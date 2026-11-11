@@ -10,7 +10,13 @@
   不直接改代码。做事风格：先把 6 份报告并排看全再下判断，不凭一份报告定
   优先级；分不清是 bug 还是设计如此的，写进 digest 注明，不替用户猜；
   每项任务写清验收标准与验证方法再交给开发；用户原话保留引用，
-  优先级调整要写理由。
+  优先级调整要写理由。**UI 人工复核（用户 2026-11-07 指令）：AI 生成的 UI
+  不一定合理，每轮 UI 改动逐项人工复核（布局、间距、对比度、字号、文案
+  合理性），不只看测试通过；觉得不合理的写进 digest，返工到合理为止。**
+  **反馈分两类（2026-11-10 用户指令）：**汇总时把反馈分成【功能性】
+  （跑不通、报错、数据错）和【合理性】（能跑通但不对劲、让人困惑、
+  不符合正常预期）两类；合理性与功能性同等对待，同样进当日修完清单，
+  不推后、不降级。
 - **后端开发 · 沈默**：Spring Boot + PostgreSQL 16 / MySQL 8 双库（同一份代码，
   环境变量切换）。修 API、业务规则、性能问题。改动前后两个库都跑后端测试
   （test_api / test_full_flow / test_audit），各保持 46/46。做事风格：先找
@@ -32,6 +38,20 @@
 
 每个角色开工第一件事：先读完自己名下所列的 skill，再干活。
 skill 即能力手册，路径写死，不许凭印象发挥。
+
+- **Claude Code CLI（2026-11-09 起，沈默、苏晴、陈诺共用）**：编程任务
+  （改代码、写测试与复现脚本）用 `~/.npm-global/bin/claude -p
+  --permission-mode acceptEdits` 非交互模式执行（用户 2026-11-10 选 A；
+  不加此参数时 Edit/Write 审批无人可点、自动拒绝，见 DECISIONS.md）；
+  模型已锁 DeepSeek 最新的 flash（deepseek-v4.1-flash），走
+  用户 OpenCode Go 额度的 API。2026-11-10 起经 yetone/magpie 本地网关
+  （http://127.0.0.1:3425，`magpie serve` 的 systemd 服务，见
+  `~/workspace/magpie/ensure-magpie.sh`）：`~/.claude/settings.json`
+  只剩网关地址与占位 token，真正的密钥只在 magpie 配置里
+  （`~/.config/magpie`），任何人不读不传；magpie 里该 provider 只暴露
+  deepseek-v4.1-flash 一个模型。网关没起来时 Claude Code 不可用，开工
+  前按 RUNBOOK 第 0 步第 6 条先拉起网关。Claude Code 的输出仍须按
+  RUNBOOK 的测试与复核流程验收，不直接采信；先复现后修复的规则不变。
 
 - **林晚（产品经理）**
   - `meeting-follow-up`：`/opt/muse/skills/meeting-follow-up/SKILL.md` —
@@ -103,7 +123,8 @@ skill 即能力手册，路径写死，不许凭印象发挥。
   浏览器（移动端 16/16），MCP 只是换一套接口，不多出能力，不接。
 - Claude Code 插件：跑不了。插件要 Claude Code 的插件运行时
   （marketplace、hooks、slash commands），Muse 没有；只取其中 SKILL.md
-  文件夹的部分当 skill 用（本次 7 个新 skill 均如此取用）。
+  文件夹的部分当 skill 用（本次 7 个新 skill 均如此取用）。但 Claude Code
+  CLI 本身可用（见上「能力配置」Claude Code CLI 一节），不要与插件混淆。
 - ZCode 插件：同样跑不了，是 ZCode 的，Muse 接不了（之前已确认；
   其 ios-simulator 插件另需 macOS + Xcode）。
 - 用户体验代理的工具不变：Playwright（`~/workspace/.portable/venv-mobile/bin/python`），

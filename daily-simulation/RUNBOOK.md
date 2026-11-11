@@ -53,6 +53,16 @@
    `mvn package` 前先跑 `bash daily-simulation/gen-maven-settings.sh`
    重生成这两份 /tmp 文件（脚本只从环境变量读代理凭据，只写 /tmp，
    不进仓库）；依赖会重新下载，构建成功后再继续。
+6. **magpie 网关（2026-11-10 起，Claude Code 必经）**：开发团队编程任务
+   走 `claude -p --permission-mode acceptEdits`，经 yetone/magpie 本地网关（http://127.0.0.1:3425）到
+   用户 OpenCode Go 额度的 DeepSeek V4.1 Flash。网关由 systemd 服务
+   `magpie.service` 跑 `magpie serve`；虚拟机重置会丢 /etc 下的 unit，
+   先跑 `bash ~/workspace/magpie/ensure-magpie.sh`（从当前环境重建
+   unit 并拉起，30 秒内验活），再验 `curl -s
+   http://127.0.0.1:3425/v1/models` 应只列出
+   `opencode-go/deepseek-v4.1-flash` 一个模型。网关不通时不要直接改
+   `~/.claude/settings.json` 绕回直连，先修网关；密钥只在
+   `~/.config/magpie` 里，不读不传。
 
 ## 1. 数据库快照
 
@@ -72,7 +82,7 @@ http://127.0.0.1:8081；抽签结果见 `runs/<日期>/ab-assignment.md`）、
 驱动方式（用 `~/workspace/.portable/venv-mobile/bin/python` + Playwright 写一段
 临时脚本操作页面并截图，或直接调后端 API）、报告写到
 `runs/YYYY-MM-DD/users/<名字>.md`（格式：试了什么、每步顺不顺、
-卡点原话、建议 + 严重度 P0/P1/P2、截图路径）。
+卡点原话、建议 + 严重度 P0/P1/P2、截图路径；每条反馈标注【功能性】或【合理性】）。
 
 - 长期用户（3 名）：先读自己的 journal 文件，按人设和昨日记录继续体验。
   沈知行：组织一次活动并看报名情况；顾晓：逛大厅并报一个活动；
@@ -80,14 +90,35 @@ http://127.0.0.1:8081；抽签结果见 `runs/<日期>/ab-assignment.md`）、
 - 新用户（3 名）：从 `new-user-angles.md` 取当日 3 个角度并打勾记日期，
   现场生成身份，以首日用户视角完成登录→逛大厅→报名（或发布）全流程。
 
+**合理性评价（2026-11-10 用户指令，硬性要求，写进每个用户代理的任务里）**：
+体验时要像第一次用这个产品的普通人一样走正常使用流程、凭生活常识
+判断，不只按测试步骤点按钮。功能上能跑通不等于合理——“能用但不对劲、
+让人困惑、不符合正常预期”的问题同样要报。合理性问题范例（用户
+2026-11-10 晚亲提，均不是功能 bug）：① 游客没登录就能看到大厅内容
+（应先登录/注册才能进大厅）；② 点开活动详情不是跳详情页、也不是在
+原地展开，而是跳到列表最上方再展开；③ 点开详情后看不到报名按钮
+（按钮被埋在页面下方，要翻很久才找得到）。
+
 禁令（写进每个用户代理的任务里）：绝不点「恢复演示数据」；
 不改他人数据；不直接改代码。
 
 **专属账号（2026-11-09 定，防并行干扰）**：长期用户各固定一个 demo
 账号，只用自己的——沈知行用 organizer、顾晓用 demo01、陆远用 demo05；
 任何代理不得用他人专属账号报名/退出/发活动（昨日陆远的 demo05 被沈知行
-代报、通知混入他人操作，均由此引起）；新用户现场注册新账号，不用 demo
-账号。digest 核对基线以当日快照为准，不拿用户截图里的中途计数当基线。
+代报、通知混入他人操作，均由此引起）；新用户现场注册新账号，用固定临时池
+temp01–temp03（见下），不用 demo 账号。digest 核对基线以当日快照为准，不拿用户截图里的中途计数当基线。
+
+**临时账号回收复用（2026-11-10 用户指令）**：新用户账号是临时的、固定池
+回收复用，共 3 个——temp01、temp02、temp03（密码均为 123456，与演示账号
+一致；种子库里没有这 3 个名，不撞号）。每天 3 名新角色按当日顺序各用一个
+（第 1 个角度用 temp01，第 2 个用 temp02，第 3 个用 temp03），注册时昵称写
+当天角色名。重置靠第 5 步的快照恢复：临时账号及当天的报名、通知、留言、
+发布全部在当日快照之后产生，恢复当日快照即全部清掉，次日重新注册同名即是
+干净账号——不需要单独的清理步骤，也不要点「恢复演示数据」（那会连种子与
+长期账号数据一起清掉，绝不能用）。长期账号（organizer、demo01、demo05）
+在种子与当日快照里，恢复时保留，任何时候都不重置、不删、不改。开跑前健康
+检查 users 不是 21，说明上一轮恢复没跑完（临时账号残留），先按第 0 步从
+种子备份重建再开跑，不要直接登录旧临时账号接着用（数据是脏的）。
 
 ## 3. 产品经理汇总（串行，1 个子代理）
 
@@ -118,7 +149,11 @@ superpowers-systematic-debugging、superpowers-test-driven-development，
 campus-buddy-qa、superpowers-verification-before-completion、webapp-testing
 （路径见 TEAM.md「能力配置」）。
 
-- 后端（沈默）、前端（苏晴）按 digest 的任务改代码。**先复现后修复**：
+- 后端（沈默）、前端（苏晴）按 digest 的任务改代码。编程任务用 Claude Code
+  CLI（`~/.npm-global/bin/claude -p --permission-mode acceptEdits` 非交互模式，
+  模型已锁 DeepSeek flash，走用户 OpenCode Go 额度；密钥不读不传，
+  见 TEAM.md「能力配置」）。
+  **先复现后修复**：
   每个任务动手前先复现问题（写失败测试，或跑一段复现脚本，或留复现
   步骤 + 截图/日志），复现成功再修；修完跑复现验证通过才算做完；
   复现不出来的先写明复现尝试与结论，不凭猜测改代码。改动记入
@@ -130,7 +165,10 @@ campus-buddy-qa、superpowers-verification-before-completion、webapp-testing
 
 ## 5. 恢复数据库并交付
 
-1. 用步骤 1 的快照恢复，复核计数回到快照时状态。**恢复 PG 快照必须先
+1. 用步骤 1 的快照恢复，复核计数回到快照时状态。**恢复即临时账号的重置：
+   当日新注册的 temp01–temp03 及它们的报名、通知、留言、发布全部清掉，次日
+   新角色重新注册同名即是干净账号；长期账号（organizer、demo01、demo05）
+   在快照里，恢复保留。**恢复 PG 快照必须先
    dropdb + createdb 再 `psql -f`（pg_dump 不含 DROP，直接恢复会残留
    测试产生的多余行）；快照文件须先 cp 到 /tmp 并 chown pgdemo
    （runs 目录文件 pgdemo 读不了）。**B 版用 DROP/CREATE + `mysql <`

@@ -40,6 +40,8 @@ def run_android(p):
     pg.goto(BASE, wait_until="networkidle")
     pg.screenshot(path=f"{OUT}/mobile-android-login.png")
     check("Android: login page loads", "找个搭子" in pg.content())
+    # 任务 19（2026-11-11）：演示入口收进折叠（默认收起），先点开展开再选账号。
+    pg.locator("details.demo-login summary").click()
     pg.locator("#quick-account").select_option(label="同学1")
     pg.get_by_role("button", name="以该身份进入").click()
     pg.wait_for_timeout(1500)
@@ -55,6 +57,8 @@ def run_android(p):
     nav(pg, "通知"); pg.wait_for_timeout(1000)
     check("Android: notifications page", True)
     pg.get_by_role("button", name="退出").click(); pg.wait_for_timeout(800)
+    # 任务 19：退出后登录页重建，演示折叠恢复默认收起，重新点开展开再选账号。
+    pg.locator("details.demo-login summary").click()
     pg.locator("#quick-account").select_option(label="组织者")
     pg.get_by_role("button", name="以该身份进入").click(); pg.wait_for_timeout(1200)
     nav(pg, "发布活动"); pg.wait_for_timeout(800)
@@ -68,6 +72,9 @@ def run_android(p):
     inputs.nth(4).fill(START)
     inputs.nth(5).fill(END)
     inputs.nth(6).fill("手机端发布测试")
+    # 11-09 任务 23：同名标题会弹非阻塞确认；测试重复跑同一天时会撞上同名，
+    # 点接受继续发布（确认本身是非阻塞提醒，不拦截入库）。
+    pg.on("dialog", lambda d: d.accept())
     pg.get_by_role("button", name="发布", exact=True).click(); pg.wait_for_timeout(1500)
     check("Android: publish via UI", "安卓手机测试" in pg.locator("main").inner_text())
     pg.screenshot(path=f"{OUT}/mobile-android-publish.png")
@@ -93,6 +100,8 @@ def run_ios(p):
     with urllib.request.urlopen(BASE + "/manifest.json") as r:
         mj = json.loads(r.read())
     check("iOS/Android: manifest valid", mj.get("short_name") == "找个搭子" and len(mj.get("icons", [])) >= 2)
+    # 任务 19（2026-11-11）：演示入口收进折叠（默认收起），先点开展开再选账号。
+    pg.locator("details.demo-login summary").click()
     pg.locator("#quick-account").select_option(label="同学5（桌游候补）")
     pg.get_by_role("button", name="以该身份进入").click()
     pg.wait_for_timeout(1500)

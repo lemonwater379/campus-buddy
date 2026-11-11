@@ -90,6 +90,8 @@ body.dark header nav button.active, body.dark .tabs button.active { color: #1414
 .withdraw-notice .primary { margin-left: 8px; }
 /* 任务 4：演示模式开关按钮（仅演示模式可见的页脚里）。 */
 .theme-btn { margin-left: auto; }
+/* 任务 14：窄屏深色切换只留短文字标签（「深色/浅色」），顶栏尽量保持一行；完整文字只在宽屏显示。 */
+.theme-label-short { display: none; }
 header .user-greet { color: var(--grey); font-size: 14px; }
 main { max-width: 980px; margin: 0 auto; padding: 28px 24px 48px; }
 .card {
@@ -109,10 +111,16 @@ main { max-width: 980px; margin: 0 auto; padding: 28px 24px 48px; }
 .card h4 { font-family: Georgia, "Songti SC", "STSong", "SimSun", serif; font-size: 16px; margin: 18px 0 8px; color: var(--ink); }
 .card p { margin: 8px 0; }
 /* UI 配图（2026-11-10）：大厅横幅 + 通用封面 + Canvas 名额环。
-   图片底色固定暖米白，深色模式下也保持原样，像照片卡片一样嵌在卡片里；
-   圆角沿用 16px；封面图带内容哈希，可放心长缓存。 */
+   图片底色固定暖米白，像照片卡片一样嵌在卡片里；圆角沿用 16px；
+   封面图带内容哈希，可放心长缓存。
+   深色模式（任务 12）：图片不再保持原样，统一压暗到 brightness(0.85)，
+   避免大块亮图在深色画布上过曝。 */
 .hero-banner { margin-bottom: 16px; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; background: #FAF9F5; }
 .hero-banner img { display: block; width: 100%; aspect-ratio: 3 / 1; object-fit: cover; }
+/* 任务 12：深色模式压暗横幅与封面图（浅色模式不变）。 */
+body.dark .hero-banner img, body.dark .card-cover img { filter: brightness(0.85); }
+/* UI 复核返工 2（2026-11-11）：登录页 hero 深色下比大厅 hero 再压暗一档。T12 规则已覆盖登录页 hero（实测 filter 已是 brightness(0.85)），但整幅亮米色大图在深色底上仍显刺眼，故登录页单独加深到 0.7；大厅 hero 保持 0.85 不动，浅色不变。 */
+body.dark .login-page .hero-banner img { filter: brightness(0.7); }
 .card-cover { margin: -22px -24px 14px; border-radius: 16px 16px 0 0; overflow: hidden; border-bottom: 1px solid var(--line); background: #FAF9F5; }
 .card-cover img { display: block; width: 100%; aspect-ratio: 16 / 9; object-fit: cover; object-position: 50% 60%; }
 .card-cover.detail-cover img { aspect-ratio: 21 / 9; }
@@ -150,15 +158,17 @@ button.danger {
   align-items: center;
   flex-wrap: wrap;
 }
-button.primary { background: var(--orange); border-color: var(--orange); color: var(--ink); font-weight: 600; font-size: 16px; }
+button.primary { background: var(--orange); border-color: var(--orange); color: #141413; font-weight: 600; font-size: 16px; }
 /* 任务 7 说明：白字写在陶土橙 #D97757 上实测 3.12:1；token 内更深的
    clay-emphasized #c6613f 配白字也只有 4.05:1，仍不够 4.5:1。
    采用墨色字 #141413 写在陶土橙底上，实测约 6.0:1（token 内解法，
    底色仍是 clay，不动设计体系；另加粗 + 16px）。 */
 button.primary:hover { filter: brightness(0.96); }
+/* UI 复核返工 1（2026-11-11）：disabled 主按钮肉眼可辨为不可点。 */
+button.primary:disabled { opacity: .55; cursor: not-allowed; }
 button.warn { background: var(--paper); border-color: var(--orange-line); color: #A85A3F; }
 button.ghost { background: transparent; color: var(--grey); }
-input, select {
+input, select, textarea {
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -167,7 +177,9 @@ input, select {
   color: var(--ink);
   font-size: 15px;
 }
-input:focus, select:focus { outline: 2px solid var(--orange); outline-offset: 1px; border-color: var(--orange); }
+/* 任务 20：多行留言框沿用页面字体，避免回退到等宽字体。 */
+textarea { font-family: inherit; }
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--orange); outline-offset: 1px; border-color: var(--orange); }
 .badge {
   display: inline-block;
   background: #F0EEE6;
@@ -238,6 +250,10 @@ section.card.publish-form .dt-row { max-width: none; }
 .login-page { max-width: 560px; margin: 0 auto; }
 .login-welcome { margin: 14px 0 4px; font-size: 1.35rem; }
 .login-sub { margin: 0 0 14px; }
+/* 任务 2（2026-11-11）：登录页底部的大厅摘要（只列名称与正式/名额，不给详情入口）。 */
+.login-hall-summary { margin-top: 8px; }
+.login-hall-summary h3 { font-size: 16px; margin: 0 0 6px; color: var(--ink); }
+.login-hall-summary p { margin: 4px 0; color: var(--grey); font-size: 14px; }
 /* 发布表单：标签在上、输入框在下，窄屏不溢出 */
 section.card label { display: block; margin: 14px 0; color: var(--ink); font-size: 15px; font-weight: 600; }
 section.card label input, section.card label select {
@@ -268,25 +284,28 @@ section.card label input, section.card label select {
 .picker-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; text-align: center; }
 .picker-week { font-size: 13px; color: var(--grey); padding: 4px 0; }
 .picker-grid button { margin: 0; padding: 6px 0; font-size: 14px; }
-.picker-grid button.active { background: var(--orange); border-color: var(--orange); font-weight: 700; }
+.picker-grid button.active { background: var(--orange); border-color: var(--orange); color: #141413; font-weight: 700; }
 .picker-time { margin: 12px 0 4px; }
 .picker-time select { margin: 0 2px; }
 /* 任务 9：留言区（详情页入口、名单视图列表）；任务 2：改时间表单区。 */
 .message-box { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
-.message-box input { width: 100%; max-width: 440px; box-sizing: border-box; }
+.message-box input, .message-box textarea { width: 100%; max-width: 440px; box-sizing: border-box; }
 .message-item { padding: 10px 0; border-top: 1px solid var(--line); }
 .message-item input { width: 100%; max-width: 440px; box-sizing: border-box; }
 .reschedule-box { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
 @media (max-width: 640px) {
-  header { padding: 12px 16px; position: static; gap: 8px; }
-  header h1 { font-size: 22px; }
+  header { padding: 12px 14px; position: static; gap: 6px; }
+  header h1 { font-size: 20px; }
+  /* 任务 14：窄屏顶栏收紧（间距/字号/按钮内边距），深色切换带短文字标签时顶栏仍只占一行。 */
+  header button { padding: 9px 10px; }
   /* 任务 19：窄屏导航收进「菜单」，问候语随导航一起收起，顶栏只剩一行 */
   header .menu-btn { display: inline-block; margin: 0 0 0 auto; }
   /* 任务 20：移动端首屏常用入口常驻（顶栏本身不动，仍只占一行约 72px）。 */
   .quick-nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
   .quick-nav button { margin-bottom: 0; }
-  /* 任务 9 + 任务 20：360px 下深色切换只留图标，避免顶栏换行变高。 */
+  /* 任务 14：窄屏深色切换留短文字标签「深色/浅色」，不只剩图标。 */
   .theme-btn .theme-label { display: none; }
+  .theme-btn .theme-label-short { display: inline; }
   .theme-btn { padding: 9px 10px; margin-left: 0; }
   header nav { display: none; }
   header nav.open { display: flex; flex-basis: 100%; }

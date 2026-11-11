@@ -3,7 +3,7 @@
     <img class="logo" src="/img/logo.webp" alt="找个搭子" />
     <h1>找个搭子</h1>
     <button v-if="user" class="menu-btn" @click="menuOpen = !menuOpen" :aria-expanded="menuOpen">☰ 菜单</button>
-    <button v-if="user" class="ghost theme-btn" @click="toggleTheme" :aria-pressed="darkMode"><span class="theme-icon">{{ darkMode ? '☀️' : '🌙' }}</span><span class="theme-label">{{ darkMode ? ' 浅色模式' : ' 深色模式' }}</span></button>
+    <button class="ghost theme-btn" @click="toggleTheme" :aria-pressed="darkMode"><span class="theme-icon">{{ darkMode ? '☀️' : '🌙' }}</span><span class="theme-label">{{ darkMode ? ' 浅色模式' : ' 深色模式' }}</span><span class="theme-label-short">{{ darkMode ? ' 浅色' : ' 深色' }}</span></button>
     <nav v-if="user" :class="{open: menuOpen}">
       <button :class="{active: view==='hall'}" @click="go('hall')">活动大厅</button>
       <button :class="{active: view==='my'}" @click="go('my')">我的活动</button>
@@ -32,25 +32,33 @@
       <input id="login-account" v-model="account" placeholder="账号" autocomplete="username" />
       <label class="field-label" for="login-password">密码</label>
       <input id="login-password" v-model="password" type="password" placeholder="密码" autocomplete="current-password" />
+      <p class="field-hint">密码要求：8–64 位，且含字母与数字。</p>
+      <p v-if="isWeakPassword" class="field-hint warn-hint">当前密码较弱：建议 8–64 位且含字母与数字（仍可注册）</p>
       <label class="field-label" for="login-nickname">昵称（仅注册时用）</label>
       <input id="login-nickname" v-model="nickname" placeholder="昵称（仅注册时用）" />
       <button class="primary" :disabled="loginBusy" @click="login">{{ loginBusy ? '提交中…' : '登录' }}</button>
       <button class="ghost" :disabled="registerBusy" @click="register">{{ registerBusy ? '提交中…' : '注册新账号' }}</button>
-      <label class="field-label" for="quick-account">演示：以以下身份进入</label>
-      <select id="quick-account" v-model="quickAccount" aria-label="演示账号选择">
-        <option value="organizer">组织者</option>
-        <option value="demo01">同学1</option>
-        <option value="demo05">同学5（桌游候补）</option>
-      </select>
-      <button class="ghost" @click="quick(quickAccount)">以该身份进入（演示）</button>
+      <details class="demo-login">
+        <summary>演示：以以下身份进入</summary>
+        <select id="quick-account" v-model="quickAccount" aria-label="演示账号选择">
+          <option value="">请选择账号</option>
+          <option value="organizer">组织者</option>
+          <option value="demo01">同学1</option>
+          <option value="demo05">同学5（桌游候补）</option>
+        </select>
+        <button class="ghost" @click="quick(quickAccount)">以该身份进入（演示）</button>
+        <p class="hint">演示账号密码均为 123456，也可注册新账号。</p>
+      </details>
       <p class="hint">账号可自定（建议用学号），没有学号也可以注册。</p>
       <template v-if="isCapacitor">
       <label class="field-label" for="login-apibase">后端地址（仅手机 App 用）</label>
       <input id="login-apibase" v-model="apiBase" placeholder="后端地址" @change="saveApiBase" />
       <p class="hint">手机 App 才填后端地址，如 http://192.168.1.5:8080；网页 / PWA 留空，用当前地址。</p>
       </template>
-      <p class="hint">演示账号密码均为 123456，也可注册新账号。</p>
-      <p class="hint">{{ seedHint }}</p>
+      </div>
+      <div class="login-hall-summary">
+        <h3>当前大厅 {{ loginHall.length }} 个活动</h3>
+        <p v-for="a in loginHall" :key="'login-hall-' + a.id">{{ a.title }} 正式 {{ a.formal_count }}/{{ a.capacity }}</p>
       </div>
     </section>
 
@@ -112,13 +120,18 @@
         <p class="info-line"><span class="info-label">地点</span><b>{{ detail.location }}</b></p>
         <p class="info-line"><span class="info-label">组织者</span><b>{{ detail.organizer_name }}</b></p>
         <p class="info-line"><span class="info-label">报名截止</span><b><span class="nowrap">{{ fmtWeek(detail.deadline) }}</span></b><span v-if="detail.status !== 'CANCELLED'">　{{ deadlineCountdown(detail) }}</span></p>
-        <p v-if="detail.formal !== undefined && detail.formal !== null && detail.reserved !== undefined && detail.waiting !== undefined" class="info-line"><span class="info-label">名额</span><b>正式 {{ detail.formal }}/{{ detail.capacity }}　预留 {{ detail.reserved }}　候补 {{ detail.waiting }}</b><span v-if="isFull(detail)">　已满员</span></p>
+        <p v-if="detail.formal !== undefined && detail.formal !== null && detail.reserved !== undefined && detail.waiting !== undefined" class="info-line"><span class="info-label">名额</span><b>正式 {{ detail.formal }}/{{ detail.capacity }}　预留 {{ detail.reserved }}　候补 {{ detail.waiting }}</b><span class="hint">（预留：已发递补邀请、待确认的名额）</span><span v-if="isFull(detail)">　已满员</span></p>
         <p v-if="detail.my_status" class="info-line"><span class="info-label">我的状态</span><b>{{ statusText(detail.my_status) }}<span v-if="detail.my_rank">，候补第 {{ detail.my_rank }} 名</span><span v-if="detail.invitation_expires_at">，请在 <span class="nowrap">{{ fmtWeek(detail.invitation_expires_at) }}</span> 前确认</span></b></p>
         <template v-if="user && detail.status !== 'CANCELLED' && (!detail.my_status || ['WITHDRAWN','EXPIRED','CANCELLED'].includes(detail.my_status))">
           <button v-if="canSignup(detail)" class="primary" :disabled="signupBusy" @click="signup(detail.activity_id || detail.id)">{{ signupBusy ? '提交中…' : (isFull(detail) ? '报名候补' : '报名') }}</button>
           <button v-else class="primary" disabled>{{ signupDisabledReason(detail) }}</button>
+          <p v-if="detail.roster" class="hint">组织者报名将占用一个正式名额。</p>
           <p class="hint">报名后组织者仅能看到你的昵称，不会索要或公开你的联系方式。</p>
           <p v-if="isFull(detail)" class="hint">名额已满，报名将进入候补队列，有人退出时按顺序递补。</p>
+        </template>
+        <template v-if="user && detail.my_status === 'WAITING'">
+          <button class="primary" disabled>报名候补</button>
+          <p class="hint">你已在候补队列中<span v-if="detail.my_rank">，第 {{ detail.my_rank }} 名</span>。</p>
         </template>
         <button v-if="user && detail.status !== 'CANCELLED' && detail.participation_id && ['FORMAL','WAITING'].includes(detail.my_status)" class="warn" @click="withdraw(detail.participation_id, detail.activity_id || detail.id, detail.title)">{{ detail.my_status === 'WAITING' ? '放弃候补' : '取消报名' }}</button>
         <p v-if="user && detail.invitation_id" class="info-line"><span class="info-label">递补邀请</span><b v-if="inviteSecondsLeft(detail.invitation_expires_at) !== undefined && inviteSecondsLeft(detail.invitation_expires_at) !== null">剩余 {{ inviteSecondsLeft(detail.invitation_expires_at) }} 秒，请及时确认</b><b v-else-if="inviteSecondsLeft(detail.invitation_expires_at) === null">邀请已过期</b></p>
@@ -136,7 +149,7 @@
         <p v-if="detail.status === 'CANCELLED'" class="info-line"><b>该活动已取消</b></p>
         <div v-if="user && detail.status !== 'CANCELLED' && !detail.roster" class="message-box">
           <label class="field-label" for="message-draft">给组织者留言</label>
-          <input id="message-draft" v-model="messageDraft" placeholder="如：请问场地有电梯吗？" maxlength="200" />
+          <textarea id="message-draft" v-model="messageDraft" placeholder="如：请问场地有电梯吗？" maxlength="200" rows="3"></textarea>
           <button class="ghost" @click="sendMessage(detail.activity_id || detail.id)">发送留言</button>
           <p class="hint">留言仅组织者可见，不公开联系方式。</p>
         </div>
@@ -160,7 +173,7 @@
               <p><b>{{ m.sender_nickname }}</b>　<span class="nowrap">{{ fmtWeek(m.created_at) }}</span></p>
               <p>{{ m.content }}</p>
               <p v-if="m.reply" class="hint">你的回复（{{ fmtWeek(m.reply.created_at) }}）：{{ m.reply.content }}</p>
-              <template v-else>
+              <template v-else-if="detail.status !== 'CANCELLED'">
                 <input v-model="replyDrafts[m.id]" placeholder="回一条（仅留言人可见）" maxlength="200" />
                 <button class="ghost" @click="replyMessage(detail.activity_id || detail.id, m.id)">回复</button>
               </template>
@@ -195,15 +208,6 @@
         <button :class="{active: myTab==='organized'}" @click="myTab='organized'">我发布</button>
         <button :class="{active: myTab==='history'}" @click="myTab='history'">历史</button>
       </div>
-      <div class="card">
-        <h4>修改密码</h4>
-        <label class="field-label" for="pw-old">原密码</label>
-        <input id="pw-old" v-model="pwForm.oldPw" type="password" autocomplete="current-password" />
-        <label class="field-label" for="pw-new">新密码</label>
-        <input id="pw-new" v-model="pwForm.newPw" type="password" autocomplete="new-password" />
-        <button class="primary" :disabled="pwBusy" @click="changePassword">{{ pwBusy ? '提交中…' : '修改密码' }}</button>
-        <p class="hint">新密码须 8–64 位，且含字母与数字；修改后需要重新登录。</p>
-      </div>
       <div v-if="myTab==='organized'">
         <div v-for="o in organized" :key="'org-' + o.id" class="card">
           <h3 class="card-title" @click="openDetail(o.id)">{{ o.title }} <span class="activity-no">#{{ o.id }}</span></h3>
@@ -221,17 +225,26 @@
       <div v-else>
         <div v-for="p in myFiltered" :key="p.id" class="card">
           <h3>{{ p.title }}</h3>
-          <p class="meta card-meta">状态：{{ statusText(p.status) }}　地点：{{ p.location }}　<span class="nowrap">开始：{{ fmtWeek(p.start_time) }}</span>
+          <p class="meta card-meta">状态：{{ statusText(p.status) }}<span v-if="p.status === 'WAITING' && rankOf(p)">，第 {{ rankOf(p) }} 名</span>　地点：{{ p.location }}　<span class="nowrap">开始：{{ fmtWeek(p.start_time) }}</span>
             <span v-if="p.invitation_expires_at">　请在 <span class="nowrap">{{ fmtWeek(p.invitation_expires_at) }}</span> 前确认</span>
             <span v-if="p.status==='INVITED' && inviteSecondsLeft(p.invitation_expires_at) !== undefined">　<span v-if="inviteSecondsLeft(p.invitation_expires_at) !== null">剩余 {{ inviteSecondsLeft(p.invitation_expires_at) }} 秒</span><span v-else>邀请已过期</span></span>
           </p>
           <p v-if="p.status==='INVITED'" class="hint">拒绝后将退出候补队列，如需再排队请重新报名。</p>
           <button v-if="['FORMAL','WAITING'].includes(p.status)" class="warn" @click="withdraw(p.id, p.activity_id, p.title)">{{ p.status === 'WAITING' ? '放弃候补' : '取消报名' }}</button>
-          <button v-if="['WITHDRAWN','EXPIRED','CANCELLED'].includes(p.status)" class="primary" @click="resignup(p.activity_id)">重新报名</button>
+          <button v-if="showResignup(p)" class="primary" @click="resignup(p.activity_id)">重新报名</button>
           <button v-if="p.invitation_id && p.status==='INVITED' && inviteSecondsLeft(p.invitation_expires_at) !== null" class="primary" @click="accept(p.invitation_id); loadMy()">接受递补</button>
           <button v-if="p.invitation_id && p.status==='INVITED' && inviteSecondsLeft(p.invitation_expires_at) !== null" class="warn" @click="reject(p.invitation_id); loadMy()">拒绝递补</button>
         </div>
         <p v-if="!myFiltered.length" class="meta">{{ myEmptyText }}</p>
+      </div>
+      <div class="card">
+        <h4>修改密码</h4>
+        <label class="field-label" for="pw-old">原密码</label>
+        <input id="pw-old" v-model="pwForm.oldPw" type="password" autocomplete="current-password" />
+        <label class="field-label" for="pw-new">新密码</label>
+        <input id="pw-new" v-model="pwForm.newPw" type="password" autocomplete="new-password" />
+        <button class="primary" :disabled="pwBusy" @click="changePassword">{{ pwBusy ? '提交中…' : '修改密码' }}</button>
+        <p class="hint">新密码须 8–64 位，且含字母与数字；修改后需要重新登录。</p>
       </div>
     </section>
 
@@ -256,7 +269,7 @@
             <p><b>{{ m.sender_nickname }}</b>　<span class="nowrap">{{ fmtWeek(m.created_at) }}</span></p>
             <p>{{ m.content }}</p>
             <p v-if="m.reply" class="hint">你的回复（{{ fmtWeek(m.reply.created_at) }}）：{{ m.reply.content }}</p>
-            <template v-else>
+            <template v-else-if="rosterActivity.status !== 'CANCELLED'">
               <input v-model="replyDrafts[m.id]" placeholder="回一条（仅留言人可见）" maxlength="200" />
               <button class="ghost" @click="replyMessage(rosterActivity.activity_id || rosterActivity.id, m.id)">回复</button>
             </template>
@@ -288,7 +301,7 @@
       <label>类别
         <select v-model="form.category"><option>羽毛球</option><option>桌游</option><option>学习组</option><option>其他</option></select>
       </label>
-      <label>地点 <input v-model="form.location" placeholder="如：江安校区体育馆三楼" /><span class="field-hint">请先写校区（望江/华西/江安/其他），再写场馆与楼层；如有电梯/坡道请写明，如：江安校区体育馆三楼，有电梯</span></label>
+      <label>地点 <input v-model="form.location" placeholder="如：江安校区体育馆三楼，提前 10 分钟在一楼大厅集合" /><span class="field-hint">请先写校区（望江/华西/江安/其他），再写场馆与楼层；如有电梯/坡道请写明，如：江安校区体育馆三楼，有电梯</span></label>
       <label>人数上限 <input v-model.number="form.capacity" type="number" min="1" max="100" /></label>
       <label class="field-label">报名截止</label>
       <div class="dt-row"><input v-model="form.deadline" placeholder="如：2026-11-09 21:00" @blur="normalizeDT('form','deadline')" /><button class="ghost" type="button" @click="openPicker('form','deadline')">📅 选择</button></div>
@@ -303,7 +316,7 @@
       <span class="field-hint">点「📅 选择」打开日历，或直接按「年-月-日 时:分」输入（24 小时制）。</span>
       <span v-if="form.end_time" class="field-hint">已选：{{ fmtWeek(form.end_time.replace('T', ' ')) }}</span>
       <label>介绍 <input v-model="form.description" /></label>
-      <label>参与条件 <input v-model="form.conditions" placeholder="如：水平不限，免费参加；新人友好；场地有电梯" /></label>
+      <label>参与条件 <input v-model="form.conditions" placeholder="如：水平不限，免费参加；没有球拍可提前说一声；新手友好，有人带" /></label>
       <button class="primary" :disabled="publishBusy" @click="publish">{{ publishBusy ? '提交中…' : '发布' }}</button>
     </section>
     <footer v-if="user && demoMode" class="page-foot">
@@ -348,12 +361,16 @@ const signupBusy = ref(false)
 const publishBusy = ref(false)
 const user = ref(null)
 const token = ref(localStorage.getItem('token') || '')
-const account = ref(''), password = ref('123456'), nickname = ref('')
+const account = ref(''), password = ref(''), nickname = ref('')
 const msg = ref('')
 const hall = ref([]), detail = ref(null), mine = ref([]), organized = ref([]), notifs = ref([]), unread = ref(0)
 const q = ref(''), category = ref(''), timeSlot = ref('')
-// 任务 9：深色模式开关（localStorage 'theme' 持久化，默认浅色）。
-const darkMode = ref(localStorage.getItem('theme') === 'dark')
+// 任务 2（2026-11-11）：登录页底部的大厅摘要（公开接口，未登录也能看）。
+const loginHall = ref([])
+// 任务 9：深色模式开关（localStorage 'theme' 持久化；首次访问跟随系统偏好）。
+const darkMode = ref(localStorage.getItem('theme')
+  ? localStorage.getItem('theme') === 'dark'
+  : (typeof window !== 'undefined' && !!window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches))
 // 任务 4：演示模式开关。普通用户默认看不到页脚恢复按钮；演示时在地址后加
 // ?demo=1 一次即可开启（写入 localStorage 'demoMode'），页脚出现恢复入口与退出按钮。
 const demoMode = ref(localStorage.getItem('demoMode') === '1')
@@ -365,7 +382,7 @@ const withdrawNotice = ref(null)
 const rosterActivity = ref(null), rosterError = ref('')
 const form = ref({ title: '', category: '羽毛球', location: '', capacity: 4, deadline: '', start_time: '', end_time: '', description: '', conditions: '' })
 // 任务 11：演示快捷登录改为下拉自选，默认不选组织者号。
-const quickAccount = ref('demo01')
+const quickAccount = ref('')
 // 任务 5：校区筛选（地点文本派生，不加字段）。
 const campus = ref('')
 // 任务 8/18：每秒刷新一次的时钟，驱动报名截止倒计时与递补邀请剩余秒数。
@@ -375,6 +392,11 @@ const messageDraft = ref('')
 // 任务 17（2026-11-10）：本人发过的留言及组织者回复（GET /api/activities/{id}/messages）。
 const myMessages = ref([])
 const replyDrafts = ref({})
+// 任务 21：活动自身状态表（activity_id -> status），/api/my 不含活动状态，
+// 由公开的 /api/activities 补齐，用于隐藏已取消活动的「重新报名」。
+const activityStatusMap = ref({})
+// 任务 10：候补排名缓存（参与 id -> 名次），/api/my 无 rank 时由详情接口补齐。
+const waitingRanks = ref({})
 // 任务 10：改密码表单。
 const pwForm = ref({ oldPw: '', newPw: '' })
 const pwBusy = ref(false)
@@ -404,6 +426,12 @@ async function api(path, method = 'GET', body) {
 }
 function statusText(s) {
   return { FORMAL: '正式成员', WAITING: '候补中', INVITED: '待确认', WITHDRAWN: '已退出', EXPIRED: '已过期', CANCELLED: '已取消' }[s] || s
+}
+// 任务 10：候补名次（优先 /api/my 自带的 rank 字段，其后是详情接口补的缓存）。
+function rankOf(p) { return p.my_rank ?? p.rank ?? waitingRanks.value[p.id] }
+// 任务 21：已取消活动不显示「重新报名」（参与状态 CANCELLED 本身不在候选中）。
+function showResignup(p) {
+  return ['WITHDRAWN', 'EXPIRED'].includes(p.status) && activityStatusMap.value[p.activity_id] !== 'CANCELLED'
 }
 // 仅展示用：把后端 ISO / 空格时间截成“YYYY-MM-DD HH:mm”，不改业务时间值
 function fmt(s) {
@@ -580,14 +608,6 @@ function campusOf(location) {
 // 任务 5：登录页种子说明改实时数据（大厅已加载时取现况）。
 // 任务 13：区分「大厅确实无活动」与「当前筛选下无活动」。
 // 任务 15：数字与列表一致——列出筛选后的全部活动，不再只取前 3 个。
-const seedHint = computed(() => {
-  if (hallLoading.value) return '活动列表加载中…'
-  if (!hall.value.length) return '当前大厅暂无活动。'
-  if (!filteredHall.value.length) return '当前筛选下暂无活动。'
-  const items = filteredHall.value.map(a => `${a.title}（正式 ${a.formal_count}/${a.capacity}）`)
-  const scope = (q.value || timeSlot.value || category.value || campus.value) ? '当前筛选' : '当前大厅'
-  return `${scope} ${filteredHall.value.length} 个活动：${items.join('；')}。`
-})
 const emptyHint = computed(() => {
   if (q.value) return `没有找到含「${q.value}」的活动，换个关键词试试`
   if (campus.value) return `「${campus.value}」校区暂无活动，换个校区试试`
@@ -780,12 +800,19 @@ function confirmPicker() {
   obj[picker.value.key] = v
   picker.value = null
 }
+// 任务 18：弱密码提示（非阻塞，仅提示；注册逻辑不改）。
+const isWeakPassword = computed(() => {
+  const p = password.value
+  return !!p && (p.length < 8 || p.length > 64 || !/[A-Za-z]/.test(p) || !/\d/.test(p))
+})
 async function login() {
   if (loginBusy.value) return
   loginBusy.value = true
   try {
     const j = await api('/api/login', 'POST', { account: account.value, password: password.value })
     token.value = j.token; localStorage.setItem('token', j.token); user.value = j.user; msg.value = '登录成功'
+    // 任务 9：登录成功后清空密码框，避免明文口令留在页面上。
+    password.value = ''
     // 登录页是单独一页：登录成功后进大厅（2026-11-10 游客不看内容）。
     view.value = 'hall'
     // 任务 18：登录成功横幅 5 秒后自动消失（另有 × 可随时关闭）；其他提示条不受影响。
@@ -797,7 +824,11 @@ async function login() {
     if (view.value === 'my') { loadMy(); loadOrganized() }
   } catch (e) { msg.value = friendlyErr(e) } finally { loginBusy.value = false }
 }
-async function quick(a) { account.value = a; password.value = '123456'; await login() }
+async function quick(a) {
+  // 任务 19：演示账号默认不选；未选时给出提示，不发起登录。
+  if (!a) { msg.value = '请先选择一个演示账号'; return }
+  account.value = a; password.value = '123456'; await login()
+}
 async function register() {
   if (registerBusy.value) return
   registerBusy.value = true
@@ -843,7 +874,13 @@ async function resignupFromNotice() {
 // 未读数、我的活动（我报名的 + 我组织的）、详情页（含 my_status /
 // 组织者名单，均属当前账号视角）。登录成功后、退出时、token 失效时都走这里。
 function clearAccountState() { mine.value = []; organized.value = []; notifs.value = []; unread.value = 0; detail.value = null; myMessages.value = []; withdrawNotice.value = null; rosterActivity.value = null; rosterError.value = '' }
-function logout() { token.value = ''; localStorage.removeItem('token'); user.value = null; clearAccountState(); view.value = 'hall' }
+function logout() {
+  token.value = ''; localStorage.removeItem('token'); user.value = null; clearAccountState(); view.value = 'hall'
+  // 任务 9：退出时清空密码框。
+  password.value = ''
+  // 任务 2：回到登录页时刷新底部的大厅摘要。
+  loadLoginHall()
+}
 // UI 配图（2026-11-10，用户定：用通用配图，不按分类配专用图——专用图使用场景有限）。
 // 3 张通用封面按活动 id 轮换，与分类无关；横幅与空状态共用 hero。
 function coverImg(id) {
@@ -862,7 +899,8 @@ function drawCapRings() {
     ctx.clearRect(0, 0, s, s)
     const cx = s / 2, cy = s / 2, r = s / 2 - 9
     ctx.lineWidth = 10
-    ctx.strokeStyle = dark ? 'rgba(240,239,236,0.18)' : 'rgba(20,20,19,0.12)'
+    // 任务 13：深色模式空环轨道提亮到 0.45，避免空名额环看不见。
+    ctx.strokeStyle = dark ? 'rgba(240,239,236,0.45)' : 'rgba(20,20,19,0.12)'
     ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke()
     const frac = Math.min(1, formal / cap)
     if (frac > 0) {
@@ -871,7 +909,7 @@ function drawCapRings() {
       ctx.beginPath(); ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac); ctx.stroke()
     }
     ctx.fillStyle = dark ? '#f0efec' : '#141413'
-    ctx.font = '600 26px system-ui, sans-serif'
+    ctx.font = (formal === 0 ? '700' : '600') + ' 26px system-ui, sans-serif'
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
     ctx.fillText(formal + '/' + cap, cx, cy + 1)
   })
@@ -887,6 +925,13 @@ async function loadHall() {
   } catch (e) { loadError.value = friendlyErr(e); hall.value = [] } finally { hallLoading.value = false; await nextTick(); drawCapRings() }
 }
 async function retryHall() { loadHall() }
+// 任务 2（2026-11-11）：登录页的大厅摘要。走公开 GET /api/activities（无需 token），
+// 过滤规则与大厅视图一致（默认不列已取消活动），只存列表供登录页显示数量与名称。
+async function loadLoginHall() {
+  try {
+    loginHall.value = (await api('/api/activities')).filter(a => a.status !== 'CANCELLED')
+  } catch (_) { loginHall.value = [] }
+}
 async function openDetail(id) {
   try {
     // 记录从哪来（大厅 / 我的活动），详情页返回时回到原地。
@@ -966,7 +1011,34 @@ async function openRoster(id) {
 }
 async function accept(id) { try { await api('/api/invitations/' + id + '/accept', 'POST'); msg.value = '已接受递补'; if (detail.value) openDetail(detail.value.id || detail.value.activity_id); loadMy() } catch (e) { msg.value = e.message } }
 async function reject(id) { try { await api('/api/invitations/' + id + '/reject', 'POST'); msg.value = '已拒绝递补'; if (detail.value) openDetail(detail.value.id || detail.value.activity_id); loadMy() } catch (e) { msg.value = e.message } }
-async function loadMy() { try { mine.value = await api('/api/my') } catch (e) { msg.value = e.message } }
+async function loadMy() {
+  try { mine.value = await api('/api/my') } catch (e) { msg.value = e.message; return }
+  // 任务 21：拉一次公开活动列表，记录活动自身状态（失败不影响列表渲染）。
+  try {
+    const list = await api('/api/activities')
+    const m = {}
+    for (const a of list) m[a.id] = a.status
+    activityStatusMap.value = m
+  } catch (_) { /* 忽略失败 */ }
+  // 任务 21 补：/api/activities 不含已取消活动，WITHDRAWN/EXPIRED 项若在 map 里
+  // 查不到，逐个查详情确认活动状态（失败忽略，按未取消处理）。
+  for (const p of mine.value) {
+    if (!['WITHDRAWN', 'EXPIRED'].includes(p.status)) continue
+    if (activityStatusMap.value[p.activity_id] !== undefined) continue
+    try {
+      const d = await api('/api/activities/' + p.activity_id)
+      if (d && d.status) activityStatusMap.value[p.activity_id] = d.status
+    } catch (_) { /* 忽略失败 */ }
+  }
+  // 任务 10：候补名次——/api/my 无 rank 的 WAITING 项逐个查详情补齐（失败忽略）。
+  for (const p of mine.value) {
+    if (p.status !== 'WAITING' || p.my_rank != null || p.rank != null) continue
+    try {
+      const d = await api('/api/activities/' + p.activity_id)
+      if (d && d.my_rank != null) waitingRanks.value[p.id] = d.my_rank
+    } catch (_) { /* 忽略失败 */ }
+  }
+}
 async function loadOrganized() { try { organized.value = await api('/api/my/organized') } catch (e) { msg.value = e.message } }
 async function loadNotif() { try { const j = await api('/api/notifications'); notifs.value = j.list; unread.value = j.unread } catch (e) { msg.value = e.message } }
 async function readAll() { await api('/api/notifications/read-all', 'POST'); loadNotif() }
@@ -1001,7 +1073,7 @@ async function publish() {
     if (form.value.title.trim() && hall.value.some(a => a.title === form.value.title.trim())) warns.push(`已有同名活动「${form.value.title.trim()}」，请确认不是重复发布`)
     if (warns.length && !confirm(warns.join('\n'))) return
     const j = await api('/api/activities', 'POST', { ...form.value, deadline, start_time: start, end_time: end })
-    msg.value = '发布成功，活动编号 ' + j.id
+    msg.value = '发布成功，活动编号 ' + j.id + '，记得给自己报名占一个名额'
     const snapMsg = msg.value
     setTimeout(() => { if (msg.value === snapMsg) msg.value = '' }, 5000)
     // 任务 23：发完清空表单（恢复空态，类别回默认值）。
@@ -1064,8 +1136,11 @@ async function replyMessage(activityId, mid) {
     msg.value = '回复已发送，留言人会收到通知'
     const snapMsg = msg.value
     setTimeout(() => { if (msg.value === snapMsg) msg.value = '' }, 5000)
-    if (view.value === 'roster') await openRoster(activityId)
-    if (detail.value) { try { await openDetail(activityId) } catch (_) {} }
+    if (view.value === 'roster') {
+      await openRoster(activityId)
+    } else if (view.value === 'detail' && detail.value) {
+      try { await openDetail(activityId) } catch (_) {}
+    }
   } catch (e) { msg.value = friendlyErr(e) }
 }
 // 任务 10：改密码（POST /api/me/password；成功后当前 token 即刻失效，须重新登录）。
@@ -1076,6 +1151,8 @@ async function changePassword() {
     await api('/api/me/password', 'POST', { old_password: pwForm.value.oldPw, new_password: pwForm.value.newPw })
     pwForm.value = { oldPw: '', newPw: '' }
     msg.value = '密码已修改，请重新登录'
+    // 任务 9：改密成功后清空密码框，再清 token。
+    password.value = ''
     token.value = ''; localStorage.removeItem('token'); user.value = null
     clearAccountState(); view.value = 'hall'
   } catch (e) { msg.value = friendlyErr(e) } finally { pwBusy.value = false }
@@ -1122,6 +1199,9 @@ onMounted(async () => {
     // 任务 3：刷新页面带 token 恢复登录时，未读数也要立即是当前账号的，
     // 不能等到手动点「通知」才刷。
     try { const j = await api('/api/me'); user.value = j.user; loadNotif() } catch { logout() }
+  } else {
+    // 任务 2：未登录时只拉公开大厅数据，供登录页底部摘要显示。
+    loadLoginHall()
   }
 })
 onUnmounted(() => { if (tickTimer) clearInterval(tickTimer) })

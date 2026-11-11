@@ -244,8 +244,12 @@ public class BuddyService {
         LocalDateTime now = LocalDateTime.now();
         // 锁定活动行：同一活动的并发报名在此串行
         var act = jdbc.queryForMap("SELECT * FROM activity WHERE id=? FOR UPDATE", activityId);
-        if (!"OPEN".equals(act.get("status")))
+        if (!"OPEN".equals(act.get("status"))) {
+            // 任务 21（2026-11-11）：已取消活动给出明确文案；READY/RUNNING/ENDED 仍用通用提示。
+            if ("CANCELLED".equals(act.get("status")))
+                throw new IllegalStateException("活动已取消，无法报名");
             throw new IllegalStateException("活动不在报名期");
+        }
         if (!now.isBefore(asLocalDateTime(act.get("deadline"))))
             throw new IllegalStateException("已过报名截止时间");
         var existing = jdbc.queryForList(
@@ -285,7 +289,11 @@ public class BuddyService {
                     "「" + nickname(userId) + "」已报名活动「" + title + "」，" + whenWhere + "。",
                     "notify:org:formal:" + activityId + ":" + userId + ":" + now);
         } else {
-            notify(userId, activityId, null, "候补", "活动「" + title + "」已满员，你已进入候补队列，" + whenWhere + "。",
+            // 任务 10（2026-11-11）：新 WAITING 记录 queued_at 最新，排在队尾，
+            // 其排名即当前候补总人数（与 detail() my_rank 的 queued_at, id 排序口径一致）。
+            int rank = waitingCount(activityId);
+            notify(userId, activityId, null, "候补",
+                    "活动「" + title + "」已满员，你已进入候补队列，第 " + rank + " 名，" + whenWhere + "。",
                     "notify:waiting:" + activityId + ":" + userId + ":" + now);
             notifyOrganizer(organizerId, userId, activityId, "候补",
                     "「" + nickname(userId) + "」已进入活动「" + title + "」的候补队列，" + whenWhere + "。",
@@ -578,6 +586,16 @@ public class BuddyService {
             var replies = jdbc.queryForList(
                     "SELECT content, created_at FROM notification WHERE event_key LIKE ? ORDER BY id LIMIT 1",
                     "msg-reply:" + mid + ":%");
+            if (!replies.isEmpty()) {
+                // 任务 7（2026-11-11）：回复通知内容带「回复（<标题>）：」前缀，展示时剥掉，
+                // 与上面剥「留言（<标题>）：」同理，让当活动语境下的回复保持干净。
+                String replyPrefix = "回复（" + title + "）：";
+                var reply = replies.get(0);
+                String replyContent = (String) reply.get("content");
+                if (replyContent != null && replyContent.startsWith(replyPrefix)) {
+                    reply.put("content", replyContent.substring(replyPrefix.length()));
+                }
+            }
             row.put("reply", replies.isEmpty() ? null : replies.get(0));
         }
         return rows;
@@ -588,7 +606,7 @@ public class BuddyService {
      *  只有组织者可回，回复对象是原留言人。 */
     @Transactional
     public Map<String, Object> replyMessage(long activityId, long organizerId, long messageId, String content) {
-        var act = jdbc.queryForMap("SELECT organizer_id FROM activity WHERE id=?", activityId);
+        var act = jdbc.queryForMap("SELECT organizer_id, title FROM activity WHERE id=?", activityId);
         if (!Objects.equals(((Number) act.get("organizer_id")).longValue(), organizerId))
             throw new IllegalStateException("只有组织者可以回复留言");
         var msg = jdbc.queryForMap(
@@ -607,7 +625,10 @@ public class BuddyService {
             throw new IllegalStateException("回复内容不能为空");
         if (content.codePointCount(0, content.length()) > 200)
             throw new IllegalStateException("回复最多 200 字");
-        notifyWithSender(senderId, activityId, null, "留言", content.trim(),
+        // 任务 7（2026-11-11）：回复通知与任务 5 的留言通知同样带活动标题，如
+        // 「回复（羽毛球双打）：……」，通知列表可按标题区分；queryMessages 展示时剥掉此前缀。
+        final String text = "回复（" + act.get("title") + "）：" + content.trim();
+        notifyWithSender(senderId, activityId, null, "留言", text,
                 "msg-reply:" + messageId + ":" + LocalDateTime.now(), organizerId);
         return Map.of("ok", true);
     }

@@ -64,17 +64,24 @@ public class AuthService {
 
     /** 任务 10（2026-11-09）：改密码。校验原密码、新密码符合 SDD 规则
      *  （8–64 位、含字母与数字）后更新散列，并撤销该用户全部旧会话 token
-     *  （含当前 token，改完须重新登录；参考 SDD“凭据更新、旧会话撤销在同一事务提交”）。 */
+     *  （含当前 token，改完须重新登录；参考 SDD“凭据更新、旧会话撤销在同一事务提交”）。
+     *  摘要决定 1（2026-11-11）：演示账号豁免 SDD 密码规则——种子演示账号按
+     *  REQUIREMENTS.md 已知偏差使用 123456，改回 123456 时不做强度拦截。 */
     public void changePassword(long userId, String oldPassword, String newPassword) {
-        if (oldPassword == null || newPassword == null)
+        if (oldPassword == null || oldPassword.isBlank() || newPassword == null || newPassword.isBlank())
             throw new IllegalStateException("请填写原密码与新密码");
-        var rows = jdbc.queryForList("SELECT password_hash FROM app_user WHERE id=?", userId);
+        var rows = jdbc.queryForList("SELECT password_hash, account FROM app_user WHERE id=?", userId);
         if (rows.isEmpty()) throw new IllegalStateException("账号不存在");
         if (!verify(oldPassword, (String) rows.get(0).get("password_hash")))
             throw new IllegalStateException("原密码不正确");
-        if (newPassword.length() < 8 || newPassword.length() > 64
+        // 摘要决定 1（2026-11-11）：demo01–demo20 / organizer / temp01–temp03 豁免 SDD 密码规则，
+        // 种子演示账号按 REQUIREMENTS.md 已知偏差使用 123456；普通账号仍走原强度校验。
+        String account = (String) rows.get(0).get("account");
+        boolean demoAccount = account != null
+                && account.matches("^(demo(0[1-9]|1[0-9]|20)|organizer|temp0[1-3])$");
+        if (!demoAccount && (newPassword.length() < 8 || newPassword.length() > 64
                 || newPassword.chars().noneMatch(Character::isLetter)
-                || newPassword.chars().noneMatch(Character::isDigit))
+                || newPassword.chars().noneMatch(Character::isDigit)))
             throw new IllegalStateException("新密码须为 8–64 位，且含字母与数字");
         jdbc.update("UPDATE app_user SET password_hash=? WHERE id=?", hash(newPassword), userId);
         revokeSessionsForUser(userId);
