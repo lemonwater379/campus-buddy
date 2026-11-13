@@ -334,11 +334,20 @@ public class BuddyService {
         var actW = jdbc.queryForMap(
                 "SELECT organizer_id, title, location, start_time, end_time FROM activity WHERE id=?", activityId);
         String title = (String) actW.get("title");
-        notify(userId, activityId, null, "退出", "你已退出活动「" + title + "」。",
+        // 任务 5（2026-11-12）：按退出前的状态区分文案——正式成员仍是「已退出活动」；
+        // 候补 / 待确认者此前从未成为正式成员，写「已放弃候补排队」更准确。
+        // 只改文案表述，状态流转与 promote() 调用不变，通知 type 仍为 '退出'。
+        boolean wasFormal = st.equals("FORMAL");
+        notify(userId, activityId, null, "退出",
+                wasFormal
+                        ? "你已退出活动「" + title + "」。"
+                        : "你已放弃活动「" + title + "」的候补排队。",
                 "notify:withdraw:" + participationId + ":" + now);
         // 任务 2：退出也通知组织者（SDD §6.8 矩阵；之前只通知本人是漏发）。
         notifyOrganizer(((Number) actW.get("organizer_id")).longValue(), userId, activityId, "退出",
-                "「" + nickname(userId) + "」已退出活动「" + title + "」，" + activityWhenWhere(actW) + "。",
+                wasFormal
+                        ? "「" + nickname(userId) + "」已退出活动「" + title + "」，" + activityWhenWhere(actW) + "。"
+                        : "「" + nickname(userId) + "」已放弃活动「" + title + "」的候补排队，" + activityWhenWhere(actW) + "。",
                 "notify:org:withdraw:" + participationId + ":" + now);
         return detail(activityId, userId);
     }
@@ -531,6 +540,11 @@ public class BuddyService {
         if (content.codePointCount(0, content.length()) > 200)
             throw new IllegalStateException("留言最多 200 字");
         long organizerId = ((Number) act.get("organizer_id")).longValue();
+        // 任务 2（2026-11-12）：组织者不能给自己的活动留言，否则会给自己写一条
+        // type='留言' 的通知；由 ApiController 的 IllegalStateException handler 映射为 400。
+        // 仅拦 postMessage，组织者回复他人留言的 replyMessage 链路不受影响。
+        if (userId == organizerId)
+            throw new IllegalStateException("组织者不能给自己的活动留言");
         LocalDateTime now = LocalDateTime.now();
         KeyHolder keyHolder = new GeneratedKeyHolder();
         // 任务 5（2026-11-10）：留言通知带活动标题，如「留言（羽毛球双打）：……」，
@@ -664,6 +678,10 @@ public class BuddyService {
             var m = mine.get(0);
             out.put("my_status", m.get("status"));
             out.put("participation_id", m.get("id"));
+            // 任务 5（2026-11-12）：joined_at 非空表示曾经成为过正式成员（候补 / 待确认者
+            // 从未被写入 joined_at），供前端区分 WITHDRAWN 的显示口径：曾正式 →「已退出」，
+            // 从未正式 →「已放弃候补」。
+            out.put("my_had_joined", m.get("joined_at") != null);
             out.put("my_queued_at", m.get("queued_at") == null ? null : asLocalDateTime(m.get("queued_at")).toString());
             var inv = jdbc.queryForList(
                     "SELECT * FROM invitation WHERE participation_id=? AND status='PENDING' ORDER BY id DESC LIMIT 1",

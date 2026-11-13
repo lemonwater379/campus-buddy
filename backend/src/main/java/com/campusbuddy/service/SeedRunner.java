@@ -17,8 +17,11 @@ public class SeedRunner implements CommandLineRunner {
 
     public SeedRunner(JdbcTemplate jdbc) { this.jdbc = jdbc; }
 
+    /** hourOffset（任务 20，2026-11-12）：种子开始时间相对偏移小时数。四个种子依次传
+     *  0/2/4/6，避免 deadline 与开始时间完全相同。偏移是相对 now 的，每日 +24h 平移后
+     *  彼此的间隔保持不变，错开关系不会丢失。 */
     private long createActivity(long org, String title, String cat, String description, String conditions,
-                                String loc, int cap, LocalDateTime now) {
+                                String loc, int cap, LocalDateTime now, int hourOffset) {
         // 旧代码用 SELECT MAX(id) 取刚插入的活动，与 ApiController.create 是同一个并发错位问题；
         // 启动时虽单线程，仍改用可移植的列名数组取生成键，避免任何并发插入时串位。
         // 必须用 new String[]{"id"} 而不是 Statement.RETURN_GENERATED_KEYS：
@@ -36,9 +39,10 @@ public class SeedRunner implements CommandLineRunner {
             ps.setString(5, conditions);
             ps.setString(6, loc);
             ps.setInt(7, cap);
-            ps.setTimestamp(8, Timestamp.valueOf(now.plusDays(2)));
-            ps.setTimestamp(9, Timestamp.valueOf(now.plusDays(3)));
-            ps.setTimestamp(10, Timestamp.valueOf(now.plusDays(3).plusHours(2)));
+            // 任务 20（2026-11-12）：四个种子用 hourOffset 错开报名截止与开始时间。
+            ps.setTimestamp(8, Timestamp.valueOf(now.plusDays(2).plusHours(hourOffset)));
+            ps.setTimestamp(9, Timestamp.valueOf(now.plusDays(3).plusHours(hourOffset)));
+            ps.setTimestamp(10, Timestamp.valueOf(now.plusDays(3).plusHours(hourOffset).plusHours(2)));
             return ps;
         }, keyHolder);
         return keyHolder.getKey().longValue();
@@ -74,20 +78,20 @@ public class SeedRunner implements CommandLineRunner {
         long a = createActivity(org, "羽毛球双打", "羽毛球",
                 "羽毛球双打，新手友好，欢迎一个人来；现场分组轮换，保证每人都能打上。",
                 "水平不限，免费参加；自带球拍，没有球拍可提前说一声",
-                "江安校区体育馆三楼", 4, now);
+                "江安校区体育馆三楼", 4, now, 0);
         long b = createActivity(org, "桌游之夜", "桌游",
                 "轻松桌游夜，有主持人带玩，新手友好，欢迎一个人来；狼人杀、卡坦岛、剧本杀轮着玩。",
                 "水平不限，免费参加；自带想玩的桌游也可以",
-                "江安校区活动中心201", 4, now);
+                "江安校区活动中心201", 4, now, 2);
         long c = createActivity(org, "学习组", "学习组",
                 "一起自习，互相监督、互不打扰；中途可以组队讨论题目，新手友好，欢迎一个人来。",
                 "水平不限，免费参加；自带学习资料，学习时保持安静",
-                "江安校区图书馆三楼", 10, now);
+                "江安校区图书馆三楼", 10, now, 4);
         // D（2026-11-08 加）：留给轻度用户报，demo01 不预先报名；容量 6，地点含校区
         long d = createActivity(org, "羽毛球友谊赛", "羽毛球",
                 "羽毛球友谊赛，以球会友、切磋为主；新手友好，欢迎一个人来，现场分组保证每人都有上场机会。",
                 "水平不限，免费参加；自带球拍和水",
-                "江安校区体育馆三楼", 6, now);
+                "江安校区体育馆三楼", 6, now, 6);
         // A: 3 正式；B: 4 正式 + 2 候补；C: 2 正式
         for (int i = 1; i <= 3; i++)
             jdbc.update("INSERT INTO participation(activity_id, user_id, status, joined_at, updated_at) VALUES (?,?, 'FORMAL', ?, ?)",
