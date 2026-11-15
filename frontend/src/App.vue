@@ -21,6 +21,7 @@
       <button @click="go('notif')">消息<span v-if="unread">（{{ unread }} 未读）</span></button>
     </div>
     <div v-if="msg" class="msg">{{ msg }}<button class="msg-close" @click="msg=''" aria-label="关闭提示">×</button></div>
+    <p v-if="!user && loginHint" class="hint">还没有账号？点「注册新账号」</p>
     <div v-if="withdrawNotice" class="msg withdraw-notice"><b>{{ withdrawNotice.text }}</b>手抖点错了？<button class="primary" @click="resignupFromNotice"><b>点这里重新报名</b></button></div>
 
     <section v-if="!user" class="login-page">
@@ -29,7 +30,7 @@
       <p class="meta login-sub">先睹为快：以下是大厅活动一览，登录后可查看详情、报名参加</p>
       <div class="login-hall-summary">
         <h3>当前大厅 {{ loginHall.length }} 个活动</h3>
-        <p v-for="a in loginHall" :key="'login-hall-' + a.id">{{ a.title }} 正式 {{ a.formal_count }}/{{ a.capacity }}</p>
+        <p v-for="a in loginHall" :key="'login-hall-' + a.id">{{ a.title }} 正式 {{ a.formal_count }}/{{ a.capacity }}<span v-if="deadlinePassed(a)"> · 已截止</span></p>
       </div>
       <div class="card login">
       <h3>登录 / 注册新账号</h3>
@@ -71,7 +72,7 @@
           <option value="">全部校区</option><option>望江</option><option>华西</option><option>江安</option><option>其他</option>
         </select>
         <select v-model="timeSlot" aria-label="按时间段筛选">
-          <option value="">全部时段</option><option value="凌晨">凌晨 0–6 点</option><option value="上午 6–9 点">上午 6–9 点</option><option value="上午 9–12 点">上午 9–12 点</option><option value="下午">下午 12–18 点</option><option value="晚上">晚上 18–24 点</option>
+          <option value="">全部时段</option><option value="凌晨">凌晨 0–6 点</option><option value="上午 6–9 点">上午 6–9 点</option><option value="上午 9–12 点">上午 9–12 点</option><option value="下午">下午 12–18 点</option><option value="晚上 18–21 点">晚上 18–21 点</option><option value="晚上 21–24 点">晚上 21–24 点</option>
         </select>
         <select v-model="category" @change="loadHall">
           <option value="">全部</option><option>羽毛球</option><option>桌游</option><option>学习组</option><option>其他</option>
@@ -95,6 +96,8 @@
         </div>
         <p v-if="q">要不要自己发一个？</p>
         <button v-if="q" class="primary" @click="goPublishWithQuery">去发活动</button>
+        <p v-if="q" class="hint">小众兴趣（如健身房、音乐、竞赛组队）请选择类别「其他」，在标题和介绍里写明关键词，方便别人搜到。</p>
+        <button v-if="q" class="ghost" @click="clearSearch">看看最近的活动</button>
       </div>
       <div v-for="a in filteredHall" :key="a.id" class="card hall-card">
         <div class="card-cover hall-cover"><img :src="coverImg(a.id)" alt="" loading="lazy" /></div>
@@ -111,6 +114,7 @@
           <p class="meta card-meta"><span class="nowrap">报名截止：{{ fmtWeek(a.deadline) }}</span>　<span class="nowrap">{{ deadlineCountdown(a) }}</span>　<span v-if="deadlineIsToday(a)" class="badge badge-accent">今天截止</span></p>
           <p class="meta card-meta"><span class="nowrap">开始：{{ fmtWeek(a.start_time) }}</span>　<span class="nowrap">组织者：{{ a.organizer_name }}</span></p>
           <p v-if="a.description" class="card-desc">{{ a.description }}</p>
+          <p v-if="a.conditions" class="card-desc">条件：{{ condSummary(a.conditions) }}</p>
           <button @click="openDetail(a.id)">{{ cardButtonText(a) }}</button>
         </div>
       </div>
@@ -127,15 +131,15 @@
         <p v-if="detail.description" class="info-line"><span class="info-label">介绍</span>{{ detail.description }}</p>
         <p v-if="detail.conditions" class="info-line"><span class="info-label">条件</span>{{ detail.conditions }}</p>
         <p class="info-line"><span class="info-label">时间</span><b><span class="nowrap">{{ fmtWeek(detail.start_time) }}</span> – <span class="nowrap">{{ fmtWeek(detail.end_time) }}</span></b><span v-if="durationText(detail)">　{{ durationText(detail) }}</span></p>
-        <p class="info-line"><span class="info-label">形式</span><b>单次活动</b><span class="hint">　本次活动仅举办一次</span></p>
+        <p class="info-line"><span class="info-label">形式</span><b>单次活动</b></p>
         <p class="info-line"><span class="info-label">地点</span><b>{{ detail.location }}</b></p>
         <p class="info-line"><span class="info-label">组织者</span><b>{{ detail.organizer_name }}</b></p>
-        <p class="info-line"><span class="info-label">报名截止</span><b><span class="nowrap">{{ fmtWeek(detail.deadline) }}</span></b><span v-if="detail.status !== 'CANCELLED'">　<span class="nowrap">{{ deadlineCountdown(detail) }}</span></span></p>
+        <p class="info-line"><span class="info-label">报名截止</span><b><span class="nowrap">{{ fmtWeek(detail.deadline) }}</span></b><span v-if="detail.status !== 'CANCELLED' && !deadlinePassed(detail)">　<span class="nowrap">{{ deadlineCountdown(detail) }}</span></span></p>
         <p v-if="detail.formal !== undefined && detail.formal !== null && detail.reserved !== undefined && detail.waiting !== undefined" class="info-line"><span class="info-label">名额</span><b v-if="detail.reserved === 0 && detail.waiting === 0">正式 {{ detail.formal }}/{{ detail.capacity }}</b><b v-else-if="detail.reserved === 0">正式 {{ detail.formal }}/{{ detail.capacity }}　候补 {{ detail.waiting }}</b><b v-else>正式 {{ detail.formal }}/{{ detail.capacity }}　预留 {{ detail.reserved }}　候补 {{ detail.waiting }}</b><span v-if="detail.reserved > 0" class="hint">（预留：已发递补邀请、待确认的名额）</span><span v-if="isFull(detail)">　已满员</span></p>
         <p v-if="detail.my_status" class="info-line"><span class="info-label">我的状态</span><b>{{ myStatusText(detail) }}<span v-if="detail.my_rank && !isQueuedWithdrawDetail(detail)">，候补第 {{ detail.my_rank }} 名</span><span v-if="detail.invitation_expires_at">，请在 <span class="nowrap">{{ fmtWeek(detail.invitation_expires_at) }}</span> 前确认</span></b></p>
         <template v-if="user && detail.status !== 'CANCELLED' && (!detail.my_status || ['WITHDRAWN','EXPIRED','CANCELLED'].includes(detail.my_status))">
           <button v-if="canSignup(detail)" class="primary" :disabled="signupBusy" @click="signup(detail.activity_id || detail.id)">{{ signupBusy ? '提交中…' : (isFull(detail) ? '报名候补' : '报名') }}</button>
-          <button v-else class="primary" disabled>{{ signupDisabledReason(detail) }}</button>
+          <button v-else class="primary" @click="go(detailFrom)">{{ signupDisabledReason(detail) }}</button>
           <p v-if="detail.roster" class="hint">组织者报名将占用一个正式名额。</p>
           <p class="hint">报名后组织者仅能看到你的昵称，不会索要或公开你的联系方式。</p>
           <p v-if="isFull(detail)" class="hint">名额已满，报名将进入候补队列，有人退出时按顺序递补。</p>
@@ -165,6 +169,7 @@
         </div>
         <div v-if="myMessages.length && !detail.roster" class="my-messages">
           <h4>我发过的留言</h4>
+          <p class="hint">组织者回复后会在通知里提醒你。</p>
           <div v-for="m in myMessages" :key="'mm-' + m.id" class="message-item">
             <p><span class="nowrap">{{ fmtWeek(m.created_at) }}</span></p>
             <p>{{ m.content }}</p>
@@ -193,7 +198,7 @@
           <template v-if="detail.status !== 'CANCELLED'">
             <button class="warn" @click="cancelActivity(detail.id)">取消活动</button>
             <button v-if="detail.status === 'OPEN' && !deadlinePassed(detail)" class="ghost" @click="openReschedule(detail)">修改时间</button>
-            <button v-if="detail.status === 'OPEN' && deadlinePassed(detail)" class="ghost" disabled>修改时间（报名已截止，不可改时间）</button>
+            <button v-if="detail.status === 'OPEN' && deadlinePassed(detail)" class="ghost" disabled>修改时间（已过截止，不可改时间）</button>
           </template>
           <div v-if="rescheduleOpen" class="reschedule-box">
             <h4>修改时间（仅报名截止前）</h4>
@@ -226,7 +231,7 @@
             <span class="badge badge-big">正式 {{ o.formal_count }}/{{ o.capacity }}</span>
             <span v-if="(o.reserved_count ?? 0) > 0" class="badge">预留 {{ o.reserved_count }}</span><span v-if="(o.waiting_count ?? 0) > 0" class="badge">候补 {{ o.waiting_count }} 人</span>
           </p>
-          <p class="meta card-meta"><span class="nowrap">报名截止：{{ fmtWeek(o.deadline) }}</span>　<span class="nowrap">开始：{{ fmtWeek(o.start_time) }}</span>　状态：{{ o.status }}</p>
+          <p class="meta card-meta"><span class="nowrap">报名截止：{{ fmtWeek(o.deadline) }}</span>　<span class="nowrap">开始：{{ fmtWeek(o.start_time) }}</span>　状态：{{ statusLabel(o) || '报名中' }}</p>
           <button @click="openDetail(o.id)">查看详情</button>
           <button v-if="o.status !== 'CANCELLED'" @click="openRoster(o.id)">查看名单</button>
         </div>
@@ -301,7 +306,7 @@
         <p v-if="g.count > 1" class="meta">同一活动 30 分钟内还有 {{ g.count - 1 }} 条同类通知，已折叠为最新一条。</p>
         <button v-if="g.count > 1" class="ghost" @click="toggleGroup(g.key)">{{ expandedGroups.has(g.key) ? '收起折叠的通知' : '展开被折叠的 ' + (g.count - 1) + ' 条' }}</button>
         <div v-if="expandedGroups.has(g.key)">
-          <p v-for="(n, i) in g.items" :key="'fold-' + n.id" class="meta"><b>{{ notifTypeText(n.type) }}</b>　第 {{ i + 1 }} 条　{{ n.content }}　<span class="nowrap">{{ fmtWeekSec(n.created_at) }}</span></p>
+          <p v-for="(n, i) in g.items" :key="'fold-' + n.id" class="meta"><b>{{ notifTypeText(n.type) }}</b>　第 {{ i + 1 }} 条　{{ n.content }}　<span class="nowrap">{{ fmtWeek(n.created_at) }}</span></p>
         </div>
         <p class="meta"><span class="nowrap">{{ fmtWeek(g.latest.created_at) }}</span>　<span v-if="!g.latest.read_at" class="unread">未读</span><span v-else>已读</span></p>
       </div>
@@ -312,10 +317,10 @@
       <h3>发布活动</h3>
       <label>标题 <input v-model="form.title" placeholder="如：羽毛球友谊赛" /><span v-if="titleWeekdayHint" class="field-hint warn-hint">{{ titleWeekdayHint }}</span></label>
       <label>类别
-        <select v-model="form.category"><option>羽毛球</option><option>桌游</option><option>学习组</option><option>其他</option></select>
+        <select v-model="form.category"><option value="">请选择</option><option>羽毛球</option><option>桌游</option><option>学习组</option><option>其他</option></select>
       </label>
-      <label>地点 <input v-model="form.location" placeholder="如：江安校区体育馆三楼，提前 10 分钟在一楼大厅集合" /><span class="field-hint">请先写校区（望江/华西/江安/其他），再写场馆与楼层；如有电梯/坡道请写明，如：江安校区体育馆三楼，有电梯</span></label>
-      <label>人数上限 <input v-model.number="form.capacity" type="number" min="1" max="100" /></label>
+      <label>地点 <input v-model="form.location" placeholder="如：江安校区体育馆三楼，提前 10 分钟在一楼大厅集合；拼车请写清出发地和目的地，如：春熙路出发 → 江安校区南门" /><span class="field-hint">请先写校区（望江/华西/江安/其他），再写场馆与楼层；如有电梯/坡道请写明，如：江安校区体育馆三楼，有电梯。拼车请写清出发地和目的地，如：市中心春熙路出发 → 江安校区南门。</span></label>
+      <label>人数上限 <input v-model.number="form.capacity" type="number" min="1" max="100" /><span class="field-hint">含组织者自己</span></label>
       <label class="field-label">报名截止</label>
       <div class="dt-row"><input v-model="form.deadline" :placeholder="'如：' + todayStr + ' 21:00'" @blur="normalizeDT('form','deadline')" /><button class="ghost" type="button" @click="openPicker('form','deadline')">📅 选择</button></div>
       <span class="field-hint">点「📅 选择」打开日历，或直接按「年-月-日 时:分」输入（24 小时制）。</span>
@@ -329,8 +334,8 @@
       <div class="dt-row"><input v-model="form.end_time" :placeholder="'如：' + tomorrowStr + ' 12:00'" @blur="normalizeDT('form','end_time')" /><button class="ghost" type="button" @click="openPicker('form','end_time')">📅 选择</button></div>
       <span class="field-hint">点「📅 选择」打开日历，或直接按「年-月-日 时:分」输入（24 小时制）。</span>
       <span v-if="form.end_time" class="field-hint">已选：{{ fmtWeek(form.end_time.replace('T', ' ')) }}</span>
-      <label>介绍 <input v-model="form.description" placeholder="如：一起自习，互相监督、互不打扰；想找固定搭子请写明频率，如：每周三晚固定" /></label>
-      <label>参与条件 <input v-model="form.conditions" placeholder="如：水平不限，免费参加；没有球拍可提前说一声；新手友好，有人带，主持人会先教规则，零基础可来；费用请写明，如：AA 场地费 10 元" /></label>
+      <label>介绍 <input v-model="form.description" placeholder="如：一起自习，互相监督、互不打扰；活动均为单次，想找固定搭子请写明频率，如：每周三晚固定" /></label>
+      <label>参与条件 <input v-model="form.conditions" placeholder="如：水平不限，免费参加；没有球拍可提前说一声；新手友好，有人带，主持人会先教规则，零基础可来；费用请写明，如：AA 场地费 10 元；招募队友请写明水平、每周投入与合作期限，如：招募建模队友，要求会 Python，每周投入 8 小时以上，合作到国赛结束" /></label>
       <button class="primary" :disabled="publishBusy" @click="publish">{{ publishBusy ? '提交中…' : '发布' }}</button>
     </section>
     <footer v-if="user && demoMode" class="page-foot">
@@ -378,6 +383,8 @@ const user = ref(null)
 const token = ref(localStorage.getItem('token') || '')
 const account = ref(''), password = ref(''), nickname = ref('')
 const msg = ref('')
+// 任务 3（2026-11-15）：登录失败时在报错下方给出注册引导（通用一句，不区分账号是否存在）。
+const loginHint = ref(false)
 const hall = ref([]), detail = ref(null), mine = ref([]), organized = ref([]), notifs = ref([]), unread = ref(0)
 const q = ref(''), category = ref(''), timeSlot = ref('')
 // 任务 2（2026-11-11）：登录页底部的大厅摘要（公开接口，未登录也能看）。
@@ -395,7 +402,7 @@ const expandedGroups = ref(new Set())
 const withdrawNotice = ref(null)
 // 任务 7：组织者名单视图的数据与错误。
 const rosterActivity = ref(null), rosterError = ref('')
-const form = ref({ title: '', category: '羽毛球', location: '', capacity: 4, deadline: '', start_time: '', end_time: '', description: '', conditions: '' })
+const form = ref({ title: '', category: '', location: '', capacity: 4, deadline: '', start_time: '', end_time: '', description: '', conditions: '' })
 // 任务 11：演示快捷登录改为下拉自选，默认不选组织者号。
 const quickAccount = ref('')
 // 任务 5：校区筛选（地点文本派生，不加字段）。
@@ -425,6 +432,13 @@ const pickerYear = ref(2026), pickerMonth = ref(11), pickerDay = ref(9), pickerH
 // 任务 18：已触发过自动刷新的过期邀请（按活动 id 去重，避免每秒重复拉取）。
 const expiredRefreshed = ref(new Set())
 let tickTimer = null
+// 任务 1（2026-11-14）：提示条自动消失按实例 id 比对，避免旧定时器清掉同文案的新提示。
+let msgSeq = 0
+function showMsg(text, ms = 5000) {
+  const id = ++msgSeq
+  msg.value = text
+  if (ms) setTimeout(() => { if (msgSeq === id) msg.value = '' }, ms)
+}
 
 const headers = () => token.value ? { 'Authorization': 'Bearer ' + token.value, 'Content-Type': 'application/json' } : { 'Content-Type': 'application/json' }
 // 手机原生 App 用：后端不在本机时，在此填电脑地址（如 http://192.168.1.5:8080），留空则用当前页面地址（网页/PWA 默认）
@@ -492,12 +506,6 @@ function parseShanghai(s) {
   if (!m) return NaN
   return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4] - 8, +m[5], +(m[6] || 0))
 }
-function fmtWeekSec(s) {
-  if (!s) return ''
-  const m = String(s).replace('T', ' ').match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})/)
-  if (!m) return fmtWeek(s)
-  return fmtWeek(s) + ':' + m[6]
-}
 // 任务 7：详情持续时长（由起止时间算出，不新增字段）。
 function durationText(a) {
   if (!a || !a.start_time || !a.end_time) return ''
@@ -510,10 +518,13 @@ function durationText(a) {
   return r ? `持续约 ${h} 小时 ${r} 分钟` : `持续约 ${h} 小时`
 }
 // 任务 8：报名截止倒计时（只显示，不改变报名判定逻辑；每秒由 nowTick 刷新）。
+// 补充任务 8（2026-11-15）：已过截止时置空——大厅卡片名额行不再重复
+// 标题徽标上的「报名已截止」（statusLabel 负责）；详情页该文案本就有
+// deadlinePassed 守卫，不受影响。
 function deadlineCountdown(a) {
   if (!a || !a.deadline) return ''
   const diff = parseShanghai(a.deadline) - nowTick.value
-  if (diff <= 0) return '报名已截止'
+  if (diff <= 0) return ''
   const mins = Math.floor(diff / 60000)
   if (mins < 1) return '距截止还有不到 1 分钟'
   if (mins < 60) return `距截止还有 ${mins} 分钟`
@@ -572,13 +583,16 @@ function canSignup(a) {
   if (!a) return false
   return a.status === 'OPEN' && !deadlinePassed(a)
 }
+// 任务 6（2026-11-15）：不可点原因不再重复标题徽标上的状态词（徽标已说明状态），
+// 统一改为操作引导；CANCELLED 分支保留（该按钮在已取消详情页本就不渲染）。
+// 补充任务 9（2026-11-15）：详情页这个按钮已去掉 disabled，改 @click="go(detailFrom)" 回大厅
+// （与「← 返回」同一目的地），所以四处共用的这句文案正好是操作引导，可直接点。
 function signupDisabledReason(a) {
   if (!a) return '报名未开始'
   if (a.status === 'CANCELLED') return '活动已取消'
-  if (a.status === 'ENDED') return '活动已结束'
-  if (a.status === 'RUNNING') return '活动进行中，报名已截止'
-  if (deadlinePassed(a)) return '报名已截止'
-  return '报名未开始'
+  // ENDED / RUNNING / OPEN 已过截止 / READY（报名未开始）：状态词已在标题徽标上，
+  // 按钮不再重复，只给操作引导（四处合并为同一句，语义与逐分支写法一致）。
+  return '看看其他活动'
 }
 // 任务 2：大厅卡片 / 详情标题的不可报标识文案（OPEN 无标识）。
 function statusLabel(a) {
@@ -598,7 +612,9 @@ function slotOf(hour) {
   if (hour < 9) return '上午 6–9 点'
   if (hour < 12) return '上午 9–12 点'
   if (hour < 18) return '下午'
-  return '晚上'
+  // 任务 15（2026-11-14）：晚上拆细为 18–21 点 / 21–24 点两档。
+  if (hour < 21) return '晚上 18–21 点'
+  return '晚上 21–24 点'
 }
 function startHour(a) {
   const m = String(a.start_time || '').match(/[T ](\d{2}):/)
@@ -640,6 +656,11 @@ function cardButtonText(a) {
   if (a.status === 'CANCELLED') return '查看详情'
   return ['FORMAL', 'WAITING', 'INVITED'].includes(a.my_status) ? '已报名 · 查看详情' : '查看详情'
 }
+// 任务 11（2026-11-14）：大厅卡片条件摘要，超过 30 字截断加省略号（只改展示）。
+function condSummary(s) {
+  s = String(s || '')
+  return s.length > 30 ? s.slice(0, 30) + '…' : s
+}
 // 任务 5：校区派生（地点文本含校区词即命中；三词皆无归「其他」；
 // 地点含多个校区词时，筛任一命中词都列出）。
 function campusOf(location) {
@@ -664,6 +685,14 @@ function goPublishWithQuery() {
   form.value.title = q.value.trim()
   view.value = 'publish'
 }
+// 任务 14（2026-11-14）：空态通用入口——清空全部筛选，回到大厅全部列表。
+function clearSearch() {
+  q.value = ''
+  category.value = ''
+  timeSlot.value = ''
+  campus.value = ''
+  loadHall()
+}
 // 任务 6 + 任务 12：大厅前端筛选。搜索在前端做（后端 /api/activities 的 q
 // 只按标题 LIKE，改后端不在本轮前端任务内）：匹配标题 + 介绍 + 参与条件 +
 // 地点（任务 4）；q 本身是「凌晨/上午/下午/晚上」时段词时，也按开始时间
@@ -683,6 +712,8 @@ const filteredHall = computed(() => {
         if (h === null) return false
         // 任务 10：「上午」仍覆盖 6–12 点两档，不只匹配其中一档。
         if (needle === '上午') return h >= 6 && h < 12
+        // 任务 15：「晚上」仍覆盖 18–24 点两档，不只匹配其中一档。
+        if (needle === '晚上') return h >= 18
         return slotOf(h) === needle
       }
       return false
@@ -896,9 +927,11 @@ const isWeakPassword = computed(() => {
 async function login() {
   if (loginBusy.value) return
   loginBusy.value = true
+  loginHint.value = false
   try {
     const j = await api('/api/login', 'POST', { account: account.value, password: password.value })
-    token.value = j.token; localStorage.setItem('token', j.token); user.value = j.user; msg.value = '登录成功'
+    token.value = j.token; localStorage.setItem('token', j.token); user.value = j.user; showMsg('登录成功')
+    loginHint.value = false
     // 任务 9：登录成功后清空密码框，避免明文口令留在页面上。
     password.value = ''
     // 登录页是单独一页：登录成功后进大厅（2026-11-10 游客不看内容）。
@@ -907,13 +940,12 @@ async function login() {
     await nextTick()
     window.scrollTo(0, 0)
     // 任务 18：登录成功横幅 5 秒后自动消失（另有 × 可随时关闭）；其他提示条不受影响。
-    setTimeout(() => { if (msg.value === '登录成功') msg.value = '' }, 5000)
     // 任务 3（换号串号）：先清掉上一个账号的缓存状态，再拉当前账号的；
     // 只拉大厅不够——顶栏未读数常驻显示，通知必须登录时就重拉，否则
     // 停在通知页换号会直接亮出上一个人的列表。
     clearAccountState(); loadHall(); loadNotif()
     if (view.value === 'my') { loadMy(); loadOrganized() }
-  } catch (e) { msg.value = friendlyErr(e) } finally { loginBusy.value = false }
+  } catch (e) { msg.value = friendlyErr(e); loginHint.value = true } finally { loginBusy.value = false }
 }
 async function quick(a) {
   // 任务 19：演示账号默认不选；未选时给出提示，不发起登录。
@@ -923,15 +955,14 @@ async function quick(a) {
 async function register() {
   if (registerBusy.value) return
   registerBusy.value = true
+  // 任务 3（2026-11-15）：注册失败不应留下「还没有账号？」的登录引导。
+  loginHint.value = false
   try {
     await api('/api/register', 'POST', { account: account.value, password: password.value, nickname: nickname.value || account.value })
     await login()
     // 任务 5：login() 会把提示写成「登录成功」；注册路径须保留「注册成功」。
     // 任务 18：注册成功横幅同样 5 秒后自动消失。
-    if (user.value) {
-      msg.value = '注册成功，已自动登录'
-      setTimeout(() => { if (msg.value === '注册成功，已自动登录') msg.value = '' }, 5000)
-    }
+    if (user.value) showMsg('注册成功，已自动登录')
   } catch (e) { msg.value = friendlyErr(e) } finally { registerBusy.value = false }
 }
 async function resignup(aid) {
@@ -946,12 +977,10 @@ async function resignup(aid) {
     // 任务 14：重新报名也用用户语言，按重新拉到的详情实际状态写（与 signup() 一致）。
     const st = detail.value?.my_status || j.my_status
     const rank = detail.value?.my_rank || j.my_rank
-    msg.value = st === 'WAITING'
+    showMsg(st === 'WAITING'
       ? (rank ? `你已进入候补队列，第 ${rank} 名` : '你已进入候补队列')
-      : st === 'INVITED' ? '你收到递补邀请，请及时确认' : '你报上了，你是正式成员'
+      : st === 'INVITED' ? '你收到递补邀请，请及时确认' : '你报上了，你是正式成员')
     // 任务 14：报名提示 5 秒自动消失（与登录横幅一致）；切页时 go() 也会清除。
-    const snapMsg = msg.value
-    setTimeout(() => { if (msg.value === snapMsg) msg.value = '' }, 5000)
     withdrawNotice.value = null
     loadMy()
     loadHall()
@@ -1006,6 +1035,9 @@ function drawCapRings() {
     ctx.fillText(formal + '/' + cap, cx, cy + 1)
   })
 }
+// 任务 2（2026-11-15）：已结束活动默认沉底。稳定排序，只把 ENDED 移到末尾，
+// 其余保持 API 原顺序（即开始时间升序）；不隐藏 ENDED，也不动已取消的过滤。
+const endedLast = list => [...list].sort((a, b) => (a.status === 'ENDED' ? 1 : 0) - (b.status === 'ENDED' ? 1 : 0))
 async function loadHall() {
   hallLoading.value = true; loadError.value = ''
   try {
@@ -1013,7 +1045,7 @@ async function loadHall() {
     // 任务 12：搜索在前端做（见 filteredHall），不再把 q 发给后端——
     // 后端 q 只按标题 LIKE，发过去会把介绍/条件命中的活动先筛掉。
     if (category.value) params.set('category', category.value)
-    hall.value = await api('/api/activities?' + params.toString())
+    hall.value = endedLast(await api('/api/activities?' + params.toString()))
   } catch (e) { loadError.value = friendlyErr(e); hall.value = [] } finally { hallLoading.value = false; await nextTick(); drawCapRings() }
 }
 async function retryHall() { loadHall() }
@@ -1021,7 +1053,8 @@ async function retryHall() { loadHall() }
 // 过滤规则与大厅视图一致（默认不列已取消活动），只存列表供登录页显示数量与名称。
 async function loadLoginHall() {
   try {
-    loginHall.value = (await api('/api/activities')).filter(a => a.status !== 'CANCELLED')
+    // 任务 2（2026-11-15）：与大厅同序——已结束排到最后，其余保持 API 原顺序。
+    loginHall.value = endedLast((await api('/api/activities')).filter(a => a.status !== 'CANCELLED'))
   } catch (_) { loginHall.value = [] }
 }
 async function openDetail(id) {
@@ -1057,12 +1090,12 @@ async function signup(id) {
     // 任务 14：报名成功提示改用户语言，按重新拉到的详情实际状态写。
     const st = detail.value?.my_status || j.my_status
     const rank = detail.value?.my_rank || j.my_rank
-    msg.value = st === 'WAITING'
+    showMsg(st === 'WAITING'
       ? (rank ? `你已进入候补队列，第 ${rank} 名` : '你已进入候补队列')
-      : st === 'INVITED' ? '你收到递补邀请，请及时确认' : '你报上了，你是正式成员'
+      : st === 'INVITED' ? '你收到递补邀请，请及时确认' : '你报上了，你是正式成员')
     // 任务 14：报名提示 5 秒自动消失（与登录横幅一致）；切页时 go() 也会清除。
-    const snapMsg = msg.value
-    setTimeout(() => { if (msg.value === snapMsg) msg.value = '' }, 5000)
+    // 任务 8（2026-11-14）：报名成功后清除退出提示横幅。
+    withdrawNotice.value = null
     loadHall()
     loadNotif()
   } catch (e) { msg.value = friendlySignupErr(e) } finally { signupBusy.value = false }
@@ -1157,9 +1190,7 @@ async function cancelActivity(id) {
     if (detail.value && (detail.value.id === id || detail.value.activity_id === id)) {
       try { await openDetail(id) } catch (_) {}
     }
-    msg.value = '活动已取消'
-    const snapMsg = msg.value
-    setTimeout(() => { if (msg.value === snapMsg) msg.value = '' }, 5000)
+    showMsg('活动已取消')
     loadHall()
     if (view.value === 'my') { loadMy(); loadOrganized() }
   } catch (e) { msg.value = e.message }
@@ -1168,6 +1199,8 @@ async function publish() {
   if (publishBusy.value) return
   publishBusy.value = true
   try {
+    // 任务 10（2026-11-14）：类别必须显式选择（默认「请选择」），未选不发请求。
+    if (!form.value.category) { showMsg('请选择类别'); return }
     // 任务 12：提交前把三处时间归一化为后端要的 T 格式；非法格式直接报，不发请求。
     const deadline = toApiDT(form.value.deadline)
     const start = toApiDT(form.value.start_time)
@@ -1180,11 +1213,9 @@ async function publish() {
     if (form.value.title.trim() && hall.value.some(a => a.title === form.value.title.trim())) warns.push(`已有同名活动「${form.value.title.trim()}」，请确认不是重复发布`)
     if (warns.length && !confirm(warns.join('\n'))) return
     const j = await api('/api/activities', 'POST', { ...form.value, deadline, start_time: start, end_time: end })
-    msg.value = '发布成功，活动编号 ' + j.id + '，记得给自己报名占一个名额'
-    const snapMsg = msg.value
-    setTimeout(() => { if (msg.value === snapMsg) msg.value = '' }, 5000)
-    // 任务 23：发完清空表单（恢复空态，类别回默认值）。
-    form.value = { title: '', category: '羽毛球', location: '', capacity: 4, deadline: '', start_time: '', end_time: '', description: '', conditions: '' }
+    showMsg('发布成功，活动编号 ' + j.id + '，记得给自己报名占一个名额')
+    // 任务 23：发完清空表单（恢复空态，类别回默认值「请选择」）。
+    form.value = { title: '', category: '', location: '', capacity: 4, deadline: '', start_time: '', end_time: '', description: '', conditions: '' }
     view.value = 'hall'; loadHall()
     // 任务 8（2026-11-13）：从页面底部提交后切回大厅，渲染完成后回到页顶，发布成功横幅才可见。
     await nextTick()
@@ -1216,9 +1247,7 @@ async function submitReschedule(id) {
     await api('/api/activities/' + id + '/reschedule', 'POST', { deadline: deadline + ':00', start_time: start + ':00', end_time: end + ':00' })
     rescheduleOpen.value = false
     await openDetail(id)
-    msg.value = '时间已修改，参与者已收到变更通知'
-    const snapMsg = msg.value
-    setTimeout(() => { if (msg.value === snapMsg) msg.value = '' }, 5000)
+    showMsg('时间已修改，参与者已收到变更通知')
     loadHall()
   } catch (e) { msg.value = friendlyErr(e) } finally { rescheduleBusy.value = false }
 }
@@ -1232,9 +1261,7 @@ async function sendMessage(id) {
     // 任务 17（2026-11-10）：发完刷新详情（新留言进「我发过的留言」区），
     // 再置提示（openDetail 会清空 msg，须在它之后设置）。
     try { await openDetail(id) } catch (_) {}
-    msg.value = '留言已发送，组织者会看到'
-    const snapMsg = msg.value
-    setTimeout(() => { if (msg.value === snapMsg) msg.value = '' }, 5000)
+    showMsg('留言已发送，组织者会看到')
   } catch (e) { msg.value = friendlyErr(e) }
 }
 // 任务 9：组织者在名单视图回一条留言（每条留言只能回一条，后端校验）。
@@ -1243,9 +1270,7 @@ async function replyMessage(activityId, mid) {
   if (!content) { msg.value = '回复内容不能为空'; return }
   try {
     await api(`/api/activities/${activityId}/messages/${mid}/reply`, 'POST', { content })
-    msg.value = '回复已发送，留言人会收到通知'
-    const snapMsg = msg.value
-    setTimeout(() => { if (msg.value === snapMsg) msg.value = '' }, 5000)
+    showMsg('回复已发送，留言人会收到通知')
     if (view.value === 'roster') {
       await openRoster(activityId)
     } else if (view.value === 'detail' && detail.value) {
@@ -1271,11 +1296,16 @@ async function resetDemo() { if (!confirm('确认恢复演示数据吗？当前�
 function go(v) {
   menuOpen.value = false
   // 任务 14：切页清除提示条（报名提示 5 秒自动消失，退出提示 15 秒；换页即清，行为与登录横幅一致）。
-  msg.value = ''; withdrawNotice.value = null
+  msgSeq++; msg.value = ''; withdrawNotice.value = null
   view.value = v
   // 任务 8（2026-11-13）：切页回到页顶，与 openDetail 已有行为一致。
   nextTick(() => window.scrollTo(0, 0))
-  if (v === 'my') { loadMy(); loadOrganized() } if (v === 'notif') loadNotif(); if (v === 'hall') loadHall()
+  if (v === 'my') { loadMy(); loadOrganized() } if (v === 'notif') loadNotif()
+  if (v === 'hall') {
+    // 任务 13（2026-11-14）：返回大厅时重置筛选项，避免从详情页回来仍停在旧筛选上。
+    q.value = ''; category.value = ''; timeSlot.value = ''; campus.value = ''
+    loadHall()
+  }
 }
 // 任务 18：每秒检查一次递补邀请是否过期；过期后自动刷新为已过期/已顺延态，
 // 不再显示可点的接受/拒绝按钮（每活动只触发一次，避免每秒重复拉取）。

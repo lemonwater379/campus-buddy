@@ -72,6 +72,8 @@ def run_android(p):
     inputs.nth(4).fill(START)
     inputs.nth(5).fill(END)
     inputs.nth(6).fill("手机端发布测试")
+    # 2026-11-14 T10：类别默认「请选择」，不选不让提交；测试须像真实用户一样先选类别。
+    pg.locator(".publish-form select").select_option("桌游")
     # 11-09 任务 23：同名标题会弹非阻塞确认；测试重复跑同一天时会撞上同名，
     # 点接受继续发布（确认本身是非阻塞提醒，不拦截入库）。
     pg.on("dialog", lambda d: d.accept())

@@ -283,7 +283,7 @@ public class BuddyService {
         String whenWhere = activityWhenWhere(act);
         if (status.equals("FORMAL")) {
             // 报名成功通知内容含活动名称及时间地点（REQUIREMENTS 硬约束 4）。
-            notify(userId, activityId, null, "报名", "你已成功报名活动「" + title + "」，" + whenWhere + "。",
+            notify(userId, activityId, null, "报名", "你已成功报名活动「" + title + "」，" + whenWhere + "。出发前如需联系组织者，请在活动详情页留言，组织者回复后会在通知里提醒你。",
                     "notify:formal:" + activityId + ":" + userId + ":" + now);
             notifyOrganizer(organizerId, userId, activityId, "报名",
                     "「" + nickname(userId) + "」已报名活动「" + title + "」，" + whenWhere + "。",
