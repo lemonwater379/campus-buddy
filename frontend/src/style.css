@@ -10,6 +10,9 @@
   --orange: #D97757;
   --orange-soft: #FDF1EC;
   --orange-line: #EACFC4;
+  /* 2026-11-17：卡片内边距变量，卡片封面用同一变量取负边距，杜绝窄屏溢出。 */
+  --card-pad-y: 22px;
+  --card-pad-x: 24px;
 }
 body {
   font-family: "Microsoft YaHei", system-ui, sans-serif;
@@ -37,15 +40,81 @@ header h1 {
   margin: 0;
   letter-spacing: 0.5px;
 }
+/* 顶栏三段（2026-11-16）：左品牌、中主导航、右治理/主题/用户菜单。
+   DOM 顺序为品牌 → 右组 → nav（移动端展开时 nav 才能整行落到最后），
+   桌面端用 order 把 nav 排到中间、右组排到最右。 */
+.header-brand { display: flex; align-items: center; gap: 10px; order: 1; flex: none; }
+.header-right { display: flex; align-items: center; gap: 8px; order: 3; flex: none; }
 /* Logo（2026-11-10）：两个搭子小人线条版，陶土橙 + 墨色细线描边，无填充；PWA 图标同款。 */
 .logo { width: 40px; height: 40px; border-radius: 12px; flex: none; }
-header nav { display: flex; gap: 8px; flex-wrap: wrap; }
+header nav { display: flex; gap: 8px; flex-wrap: wrap; order: 2; margin: 0 auto; }
 header nav button {
-  background: var(--paper);
+  background: transparent;
   color: var(--ink);
-  border: 1px solid var(--line);
+  border: 1px solid transparent;
 }
-header nav button.active { background: var(--orange); border-color: var(--orange); color: var(--ink); font-weight: 600; }
+header nav button:hover { border-color: var(--line); }
+/* 当前页：墨色粗体 + 陶土 2px 下划线，不再整块填充；填充只留给发布 CTA。 */
+header nav button.nav-item.active,
+.nav-admin.active {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink);
+  font-weight: 700;
+  box-shadow: inset 0 -2px 0 var(--orange);
+}
+header nav button.nav-item.active:hover, .nav-admin.active:hover { border-color: transparent; }
+/* 发布活动：全顶栏唯一填充主按钮（active 时也保持填充，只去掉下划线）。 */
+header nav button.nav-cta,
+header nav button.nav-cta.active {
+  background: var(--orange);
+  border-color: var(--orange);
+  color: #141413;
+  font-weight: 600;
+}
+header nav button.nav-cta:hover { border-color: var(--orange); filter: brightness(0.96); }
+header nav button.nav-cta.active { box-shadow: none; }
+/* 治理工作台入口（管理员才渲染）与「管理员」小字标签。 */
+.nav-admin { background: transparent; color: var(--ink); border: 1px solid transparent; margin: 0; }
+.nav-admin:hover { border-color: var(--line); }
+.admin-tag {
+  display: inline-block; margin-left: 5px; padding: 0 6px;
+  border: 1px solid var(--line); border-radius: 999px;
+  font-size: 11px; font-weight: 400; color: var(--grey); line-height: 1.5;
+}
+/* 通知未读：红点 + 数字徽标（替代原「（N 未读）」文字）。 */
+.unread-badge {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; padding: 0 5px; margin-left: 6px;
+  border-radius: 999px; background: #863311; color: #fff;
+  font-size: 12px; font-weight: 700; line-height: 1;
+}
+/* 用户菜单（昵称 + ▾）：下拉右对齐卡片。 */
+.user-menu { position: relative; }
+.user-menu-btn { margin: 0; background: transparent; color: var(--ink); border: 1px solid var(--line); }
+.user-menu-pop {
+  position: absolute; right: 0; top: calc(100% + 8px); z-index: 30;
+  min-width: 220px; padding: 8px;
+  background: var(--paper); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: 0 10px 28px rgba(20, 20, 19, 0.14);
+}
+.user-menu-greet {
+  margin: 6px 10px 8px; color: var(--grey); font-size: 13px;
+  line-height: 1.45; word-break: break-all;
+}
+.user-menu-pop button {
+  display: block; width: 100%; margin: 0 0 2px; padding: 8px 10px;
+  background: transparent; border: 1px solid transparent; border-radius: 8px;
+  color: var(--ink); font-size: 14px; text-align: left;
+}
+.user-menu-pop button:hover { background: var(--orange-soft); border-color: var(--orange-line); }
+.user-menu-sep { border: 0; border-top: 1px solid var(--line); margin: 6px 4px; }
+.menu-unread-dot {
+  position: absolute; top: 4px; right: 4px; width: 8px; height: 8px;
+  border-radius: 50%; background: #863311;
+  box-shadow: 0 0 0 2px var(--cream);
+}
+header nav .nav-mobile-only { display: none; }
 /* 任务 9：完整深色模式。只用 REA v4 深色 token（skill §1.1/§1.4）：
    画布 S0 #0b0b0b、主画布 S1 #151515、卡片 S2 #1a1a19、浮层 S3 #20201f；
    正文 #f0efec、次要 #c3c2b7、柔和 #898781；clay #d97757 / #c6613f 不变；
@@ -66,18 +135,30 @@ body.dark button.warn { color: #f0a58c; border-color: rgba(240, 239, 236, 0.18);
 body.dark .unread { color: #ec835a; }
 body.dark .skeleton-bar { background: #2c2c2a; }
 body.dark input, body.dark select { color-scheme: dark; }
-body.dark header nav button.active, body.dark .tabs button.active { color: #141413; }
+body.dark .tabs button.active { color: #141413; }
+/* 2026-11-16 新类深色：当前页用墨色（即深色下的浅字）+ 陶土下划线；
+   徽标沿用现有 dark badge 口径，临期 chip 沿用 badge-full/badge-accent 深色值。 */
+body.dark .user-menu-pop { box-shadow: 0 10px 28px rgba(0, 0, 0, 0.55); }
+body.dark .unread-badge { background: #ec835a; color: #141413; }
+body.dark .menu-unread-dot { background: #ec835a; }
+body.dark .notif-dot { background: #ec835a; }
+body.dark .badge-type { background: #2c2c2a; border-color: rgba(240, 239, 236, 0.14); color: #f0efec; }
+body.dark .badge-type-accent { background: #2c2c2a; border-color: #863311; color: #f4ae94; }
+body.dark .cd-chip.normal { background: #2c2c2a; border-color: rgba(240, 239, 236, 0.14); color: #f0efec; }
+body.dark .cd-chip.expired { background: #20201f; border-color: rgba(240, 239, 236, 0.14); color: #898781; }
+body.dark .cd-chip.urgent { background: #863311; border-color: #863311; color: #f4ae94; }
+body.dark .notif-tabs { background: var(--paper); border-color: var(--line); }
+body.dark .notif-tabs button.active { background: var(--ink); color: var(--cream); }
 /* 任务 19：窄屏菜单按钮，桌面隐藏 */
 .menu-btn { display: none; }
+/* 2026-11-17：移动抽屉遮罩，桌面不渲染（模板也只在 menuOpen 时挂载）。 */
+.nav-backdrop { display: none; }
 /* 任务 9 实测对比度（WCAG，脚本算出，见 changes.md）：正文 #f0efec/#1a1a19 15.15:1、
    次要 #c3c2b7/#1a1a19 9.72:1、主按钮墨字 #141413/#d97757 5.90:1、
    满员徽章白字/#863311 8.42:1、退出橙 #ec835a/#1a1a19 6.60:1、badge-accent
    #f4ae94/#1a1a19 9.40:1、warn #f0a58c/#1a1a19 8.68:1，均 ≥4.5:1。 */
 /* 任务 21：大厅卡片活动编号小字（不喧宾夺主）。 */
 .activity-no { color: var(--grey); font-size: 13px; font-weight: 400; }
-/* 任务 20：移动端常用入口常驻条（桌面隐藏；文案刻意不用「我的活动/发布活动/
-   通知」，避免与顶栏导航同名导致移动端测试的角色定位歧义）。 */
-.quick-nav { display: none; }
 /* 任务 18：提示条关闭按钮。 */
 .msg { position: relative; padding-right: 40px; }
 .msg-close {
@@ -88,17 +169,16 @@ body.dark header nav button.active, body.dark .tabs button.active { color: #1414
 /* 任务 19：退出提示条更明显——加粗边框 + 左侧深色条 + 更大字号。 */
 .withdraw-notice { border: 2px solid #863311; border-left: 6px solid #863311; font-size: 16px; }
 .withdraw-notice .primary { margin-left: 8px; }
-/* 任务 4：演示模式开关按钮（仅演示模式可见的页脚里）。 */
-.theme-btn { margin-left: auto; }
+/* 任务 4：演示模式开关按钮（本轮移到顶栏右组内，不再用 auto 外边距）。 */
+.theme-btn { margin-left: 0; }
 /* 任务 14：窄屏深色切换只留短文字标签（「深色/浅色」），顶栏尽量保持一行；完整文字只在宽屏显示。 */
 .theme-label-short { display: none; }
-header .user-greet { color: var(--grey); font-size: 14px; }
 main { max-width: 980px; margin: 0 auto; padding: 28px 24px 48px; }
 .card {
   background: var(--paper);
   border: 1px solid var(--line);
   border-radius: 16px;
-  padding: 22px 24px;
+  padding: var(--card-pad-y) var(--card-pad-x);
   margin-bottom: 16px;
   box-shadow: none;
 }
@@ -126,7 +206,7 @@ body.dark .card-cover img { filter: brightness(0.55) saturate(0.85); }
 /* UI 复核返工 2（2026-11-11）+ 任务 3 返工（2026-11-12/13）：登录页 hero 保持 0.55，
    与大厅 hero、卡片/详情封面同一压暗档；浅色均不变。 */
 body.dark .login-page .hero-banner img { filter: brightness(0.55); }
-.card-cover { margin: -22px -24px 14px; border-radius: 16px 16px 0 0; overflow: hidden; border-bottom: 1px solid var(--line); background: #FAF9F5; }
+.card-cover { margin: calc(-1 * var(--card-pad-y)) calc(-1 * var(--card-pad-x)) 14px; border-radius: 16px 16px 0 0; overflow: hidden; border-bottom: 1px solid var(--line); background: #FAF9F5; }
 .card-cover img { display: block; width: 100%; aspect-ratio: 16 / 7; object-fit: cover; object-position: 50% 60%; filter: saturate(0.85); }
 .card-cover.detail-cover img { aspect-ratio: 21 / 4; }
 /* 任务 16（2026-11-13）：大厅卡片桌面端左图右文，配图占满卡片高度、圆角 12px；
@@ -281,6 +361,48 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--orange); ou
 .unread { color: #863311; font-weight: 700; }
 .notif-row { border-left: 4px solid transparent; }
 .notif-row.notif-unread { background: var(--orange-soft); border-left-color: #863311; }
+/* 2026-11-16：通知筛选行 + 四区卡片（徽标行 / 摘要 / 关键时间 / 行动区）。
+   层级只靠位置、字重与唯一陶土填充（查看递补），类型徽标不按类型上色。 */
+.notif-filter { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 6px 0 12px; }
+.notif-filter-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.notif-tabs { display: inline-flex; background: var(--paper); border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+.notif-tabs button { margin: 0; padding: 6px 14px; background: transparent; border: 0; border-radius: 0; color: var(--grey); font-size: 14px; }
+.notif-tabs button.active { background: var(--ink); color: var(--cream); font-weight: 600; }
+.notif-filter-note { font-size: 12px; color: var(--grey); }
+.notif-readall { margin: 0; }
+.notif-card { padding: 18px 20px; }
+.notif-badge-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.notif-badge-row .badge { margin: 0; }
+.badge-type { background: #F0EEE6; border-color: var(--line); color: var(--ink); font-weight: 600; }
+.badge-type-accent { background: var(--orange-soft); border-color: var(--orange-line); color: #8F4A33; }
+.notif-group-count { color: var(--grey); font-size: 13px; }
+.notif-state { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; font-size: 12px; }
+.notif-state .unread { font-size: 12px; }
+.notif-read-text { color: var(--grey); font-size: 12px; }
+.notif-dot { display: inline-block; flex: none; width: 8px; height: 8px; border-radius: 50%; background: #863311; }
+.notif-summary { margin: 8px 0; color: var(--ink); }
+.notif-keytime { margin: 6px 0; }
+.cd-chip {
+  display: inline-block; padding: 2px 10px;
+  border: 1px solid var(--line); border-radius: 999px;
+  font-size: 13px; font-weight: 600; line-height: 1.5;
+}
+.cd-chip.normal { background: #F0EEE6; color: var(--ink); }
+.cd-chip.expired { background: #F0EEE6; color: var(--grey); }
+.cd-chip.urgent { background: var(--orange); border-color: var(--orange); color: #141413; }
+.notif-fold-note { margin: 6px 0 0; }
+.notif-fold-toggle { margin: 4px 0 0; }
+.notif-fold-list { margin-top: 6px; border-top: 1px solid var(--line); }
+p.notif-fold-item { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 0; padding: 7px 0 7px 12px; border-bottom: 1px solid var(--line); color: var(--grey); font-size: 13px; cursor: pointer; }
+p.notif-fold-item:last-child { border-bottom: 0; }
+.notif-fold-text { flex: 1; min-width: 0; }
+.notif-fold-time { color: var(--grey); font-size: 12px; }
+.notif-action { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+.notif-action-left { display: flex; align-items: center; gap: 8px; }
+.notif-cta, .notif-rank-btn { margin: 0; }
+.notif-time { white-space: nowrap; }
+.notif-empty { margin: 8px 0; }
+.notif-empty p { margin-bottom: 8px; }
 /* 任务 12：首屏骨架屏 */
 .skeleton-bar { height: 14px; background: #F0EEE6; border-radius: 999px; margin: 10px 0; animation: skeleton-pulse 2s linear infinite; }
 .skeleton-bar.short { width: 60%; }
@@ -289,12 +411,18 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--orange); ou
 .load-error { border-color: var(--orange-line); }
 /* 任务 11：搜索空状态 */
 .empty-state { text-align: center; color: var(--grey); }
+/* 任务 6（2026-11-16）：空态插画收小（只改空态内的封面，不动大厅卡片与详情封面）。
+   封面原 margin-top 为 -22px（卡片首子元素时贴边）；文案移到封面上方后，
+   该负边距会把图拉上去盖住文案，故空态内改回正边距。 */
+.empty-state .card-cover { margin: 14px calc(-1 * var(--card-pad-x)); }
+.empty-state .card-cover img { aspect-ratio: 21 / 4; }
 /* 任务 15：「我的活动」四个视图切换 */
 .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .tabs button.active { background: var(--orange); border-color: var(--orange); color: var(--ink); font-weight: 600; }
 /* 任务 3 返工（2026-11-09）：发布表单输入框与卡片同宽（原 max-width 440px
    时条件占位尾部「场地有电梯」被截断），只放宽发布表单，不动其他卡片。 */
 section.card.publish-form label input, section.card.publish-form label select,
+section.card.publish-form label textarea,
 section.card.publish-form .dt-row { max-width: none; }
 /* 任务 18：登录输入框正式标签；任务 5：发布表单标签 15px 墨色 */
 .field-label { display: block; font-size: 15px; color: var(--ink); font-weight: 600; margin: 10px 0 2px; }
@@ -313,7 +441,7 @@ section.card.publish-form .dt-row { max-width: none; }
 .login-hall-summary p { margin: 4px 0; color: var(--grey); font-size: 14px; }
 /* 发布表单：标签在上、输入框在下，窄屏不溢出 */
 section.card label { display: block; margin: 14px 0; color: var(--ink); font-size: 15px; font-weight: 600; }
-section.card label input, section.card label select {
+section.card label input, section.card label select, section.card label textarea {
   display: block;
   width: 100%;
   max-width: 440px;
@@ -355,21 +483,133 @@ section.card label input, section.card label select {
   header h1 { font-size: 20px; }
   /* 任务 14：窄屏顶栏收紧（间距/字号/按钮内边距），深色切换带短文字标签时顶栏仍只占一行。 */
   header button { padding: 9px 10px; }
-  /* 任务 19：窄屏导航收进「菜单」，问候语随导航一起收起，顶栏只剩一行 */
-  header .menu-btn { display: inline-block; margin: 0 0 0 auto; }
-  /* 任务 20：移动端首屏常用入口常驻（顶栏本身不动，仍只占一行约 72px）。 */
-  .quick-nav { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
-  .quick-nav button { margin-bottom: 0; }
+  /* 2026-11-16：顶行 = 品牌 + 主题 + ☰；☰ 旁小红点保证未读可见。 */
+  .header-brand { order: 1; gap: 8px; }
+  .header-right { order: 2; margin-left: auto; gap: 6px; }
+  header nav { order: 3; }
+  .nav-admin, .user-menu { display: none; }
+  header .menu-btn { display: inline-block; position: relative; margin: 0; }
   /* 任务 14：窄屏深色切换留短文字标签「深色/浅色」，不只剩图标。 */
   .theme-btn .theme-label { display: none; }
   .theme-btn .theme-label-short { display: inline; }
   .theme-btn { padding: 9px 10px; margin-left: 0; }
-  header nav { display: none; }
-  header nav.open { display: flex; flex-basis: 100%; }
-  header nav .user-greet { flex-basis: 100%; }
+  /* 2026-11-17：窄屏导航改覆盖式侧边抽屉（不占主界面布局），桌面顶栏零改动。 */
+  .nav-backdrop {
+    display: block; position: fixed; inset: 0; z-index: 40;
+    background: rgba(20, 20, 19, 0.25);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+  }
+  header nav {
+    display: flex;
+    position: fixed; top: 0; right: 0;
+    height: 100vh; height: 100dvh;
+    width: min(78vw, 320px);
+    z-index: 41;
+    margin: 0;
+    background: var(--paper);
+    border-left: 1px solid var(--line);
+    box-shadow: -12px 0 32px rgba(20, 20, 19, 0.18);
+    flex-direction: column;
+    align-items: stretch;
+    flex-wrap: nowrap;
+    gap: 8px;
+    padding: 18px 16px;
+    overflow-y: auto;
+    transform: translateX(105%);
+    transition: transform 240ms ease;
+    visibility: hidden;
+  }
+  header nav.open { transform: translateX(0); visibility: visible; }
+  header nav .nav-mobile-only { display: block; }
+  header nav.open button { text-align: left; }
+  header nav.open .nav-cta { text-align: center; }
+  .nav-mobile-greet { margin: 10px 0 4px; color: var(--grey); font-size: 14px; word-break: break-all; }
   main { padding: 16px; }
-  .card { padding: 16px; border-radius: 14px; }
+  .card { --card-pad-y: 16px; --card-pad-x: 16px; padding: 16px; border-radius: 14px; }
   .card h3 { font-size: 19px; }
   button { padding: 9px 14px; }
-  section.card label input, section.card label select { max-width: none; }
+  section.card label input, section.card label select, section.card label textarea { max-width: none; }
 }
+/* 2026-11-17：系统偏好减少动效时，抽屉不做滑入滑出动画。 */
+@media (prefers-reduced-motion: reduce) {
+  header nav { transition: none; }
+}
+
+/* 阶段二 CEM-08（2026-11-15）：签到码卡片与出勤核对区 */
+.checkin-box { margin-top: 12px; padding: 12px; border: 1px dashed var(--border, #d8d2c4); border-radius: 12px; }
+.checkin-code { font-size: 28px; letter-spacing: 6px; font-variant-numeric: tabular-nums; }
+.attendance-box { margin-top: 16px; }
+.attendance-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+.attendance-row input { flex: 1; min-width: 140px; }
+.eval-stars button { font-size: 18px; padding: 4px 8px; }
+
+/* 阶段三 CEM-10：我的信用 */
+.credit-score { font-size: 1.3em; }
+.credit-down { color: #b3261e; }
+.credit-up { color: #2e7d32; }
+
+/* 阶段四 CEM-09（2026-11-15）：平台治理。沿用既有变量与色系，不引新 token。 */
+.admin-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 0 16px; align-items: start; }
+.admin-grid .card { min-width: 0; }
+.overview-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 12px; }
+.overview-grid p { margin: 0; }
+.overview-grid b { display: block; font-size: 22px; line-height: 1.2; }
+.gov-row { padding: 10px 0; border-top: 1px solid var(--line); }
+.gov-row p { margin: 4px 0; }
+.gov-row input, .gov-row select { max-width: 100%; box-sizing: border-box; }
+.gov-row input:not([type]) { min-width: 140px; }
+.cred-box { border: 2px solid var(--orange); background: var(--orange-soft); border-radius: 12px; padding: 12px 16px; margin: 10px 0; }
+.cred-box p { margin: 4px 0; }
+.cred-value { font-family: ui-monospace, "SFMono-Regular", Consolas, monospace; font-size: 18px; font-weight: 700; letter-spacing: 1px; word-break: break-all; user-select: all; }
+.report-box, .appeal-box { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
+.report-box textarea, .appeal-box textarea { width: 100%; max-width: 440px; box-sizing: border-box; }
+.report-organizer-btn { margin-left: 8px; padding: 3px 10px; font-size: 13px; }
+.recovery-entry { margin-top: 12px; }
+.recovery-card textarea, .recovery-card input, .recovery-card select { width: 100%; max-width: 360px; box-sizing: border-box; }
+.saved-creds { background: var(--orange-soft); border: 1px solid var(--orange-line); border-radius: 10px; padding: 8px 12px; }
+.ban-impact { padding: 8px 12px; border: 1px dashed var(--line); border-radius: 12px; margin: 8px 0; }
+.my-gov-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 0 16px; align-items: start; }
+
+/* ===== 2026-11-17：注册独立页 / 登录注册反馈浮层 =====
+   全部沿用现有令牌（不新增颜色/字体/圆角）；追加在文件末尾，
+   以同特异度、后者生效的方式覆盖 .login 的 360px 输入宽度口径。 */
+.register-page { max-width: 420px; margin: 0 auto; }
+.auth-card { max-width: 420px; margin-left: auto; margin-right: auto; }
+.auth-card input { width: 100%; max-width: none; font-size: 16px; box-sizing: border-box; margin: 6px 0; }
+.auth-card .field-label { max-width: none; }
+.auth-primary { width: 100%; min-height: 48px; margin-right: 0; }
+.field-slot { min-height: 1.5em; font-size: 13px; color: var(--grey); margin-top: 4px; }
+.field-error { color: #863311; font-weight: 600; }
+body.dark .field-error { color: #f0a58c; }
+input[aria-invalid="true"] { border-color: #863311; }
+.pwd-row { display: flex; gap: 8px; align-items: stretch; }
+.pwd-row input { flex: 1; min-width: 0; }
+.pwd-toggle { flex: none; min-height: 44px; margin: 6px 0; }
+.pwd-rules { list-style: none; margin: 4px 0 0; padding: 0; font-size: 13px; color: var(--grey); }
+.pwd-rules li { display: inline-block; margin-right: 14px; }
+.pwd-rules li.ok { color: var(--ink); }
+.pwd-rules li.ok .tick { color: var(--orange); font-weight: 700; }
+.auth-switch-row { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 12px; text-align: center; }
+.link-btn {
+  border: 0; background: transparent; margin: 0; padding: 4px 2px;
+  color: #A85A3F; font-weight: 600;
+  text-decoration: underline; text-underline-offset: 3px;
+  cursor: pointer; font-size: inherit;
+}
+body.dark .link-btn { color: #f0a58c; }
+/* 登录/注册结果反馈：居中模态，背景变暗 + 高斯模糊（与移动抽屉同一覆盖纪律）。 */
+.auth-modal-backdrop {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px;
+  background: rgba(20, 20, 19, 0.35);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+}
+.auth-modal-card {
+  background: var(--paper); border: 1px solid var(--line); border-radius: 16px;
+  box-shadow: 0 16px 40px rgba(20, 20, 19, 0.22);
+  padding: 22px 24px; width: min(92vw, 380px); box-sizing: border-box;
+}
+.auth-modal-tag { font-weight: 700; font-size: 15px; margin: 0 0 8px; color: var(--ink); }
+.auth-modal-text { margin: 0 0 16px; color: var(--ink); line-height: 1.65; word-break: break-word; }
+body.dark .auth-modal-card { box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6); }

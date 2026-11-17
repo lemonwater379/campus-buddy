@@ -5,7 +5,7 @@
 """
 import concurrent.futures, json, os, sys, urllib.request, urllib.error
 
-BASE = os.environ.get("BASE_URL", "http://127.0.0.1:8080") + "/api"
+BASE = os.environ.get("BASE_URL", "http://127.0.0.1:8080") + "/api/v1"
 from datetime import datetime, timedelta
 # 活动时间取相对日期，避免写死日期过期导致创建被拒（2026-11-08 首次过期：截止 11-07 已过）。
 # 形状与旧写死值一致：截止=明天 20:00，开始=后天 20:00，结束=后天 22:00。
@@ -18,24 +18,30 @@ results = []
 def check(name, cond, detail=""):
     results.append(bool(cond)); print(("PASS" if cond else "FAIL"), "-", name, str(detail)[:400])
 def req(method, path, token=None, body=None):
-    """返回 (http_status, json_or_text)。"""
+    """v1 统一返回体：返回 (http_status, data)；data 注入兼容键 ok/error，尽量不改原断言。"""
     r = urllib.request.Request(BASE + path, method=method,
         data=json.dumps(body).encode() if body is not None else None,
         headers={"Content-Type": "application/json", **({"Authorization": "Bearer " + token} if token else {})})
     try:
         with urllib.request.urlopen(r) as resp:
-            return resp.status, json.loads(resp.read())
+            status, env = resp.status, json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        try: return e.code, json.loads(e.read())
-        except Exception: return e.code, {"error": "non-json"}
+        status = e.code
+        try: env = json.loads(e.read())
+        except Exception: return status, {"ok": False, "error": "non-json"}
     except Exception as e:
-        return 0, {"error": str(e)}
+        return 0, {"ok": False, "error": str(e)}
+    d = env.get("data")
+    out = dict(d) if isinstance(d, dict) else {}
+    out["ok"] = bool(env.get("success"))
+    out["error"] = env.get("message")
+    return status, out
 def login(a, p="123456"):
     s, d = req("POST", "/login", body={"account": a, "password": p})
     assert d.get("ok"), d; return d["token"]
-def my(t): return req("GET", "/my", token=t)[1]
+def my(t): return req("GET", "/my?pageSize=100", token=t)[1]
 def mine_for(t, aid):
-    rows = [p for p in my(t) if p["activity_id"] == aid]; return rows[0] if rows else None
+    rows = [p for p in my(t).get("items", []) if p["activity_id"] == aid]; return rows[0] if rows else None
 def make_activity(tok, title, cap=2):
     s, d = req("POST", "/activities", token=tok, body={
         "title": title, "category": "其他", "description": "审计测试",
@@ -95,15 +101,17 @@ deadlock_hits = 0; rounds = 0
 for rnd in range(12):
     aid = make_activity(org, f"死锁测试-{rnd}", cap=1)
     t1, t2 = login("demo01"), login("demo02")
-    req("POST", f"/activities/{aid}/signup", token=t1)  # demo01 正式
-    req("POST", f"/activities/{aid}/signup", token=t2)  # demo02 候补
+    # 阶段一时间冲突检测：12 轮活动时间相同，demo01/02 会与上一轮正式参与重叠；
+    # 带 confirmConflict 保持原并发场景可执行，断言本身不动。
+    req("POST", f"/activities/{aid}/signup", token=t1, body={"confirmConflict": True})  # demo01 正式
+    req("POST", f"/activities/{aid}/signup", token=t2, body={"confirmConflict": True})  # demo02 候补
     p1 = mine_for(t1, aid)
     req("POST", f"/participations/{p1['id']}/withdraw", token=t1)  # demo02 被邀请
     m2 = mine_for(t2, aid)
     inv, part = m2["invitation_id"], m2["id"]
     assert inv and m2["status"] == "INVITED", m2
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as ex:
-        f_acc = ex.submit(req, "POST", f"/invitations/{inv}/accept", t2)
+        f_acc = ex.submit(req, "POST", f"/invitations/{inv}/accept", t2, {"confirmConflict": True})
         f_wd = ex.submit(req, "POST", f"/participations/{part}/withdraw", t2)
         sa, da = f_acc.result(); sw, dw = f_wd.result()
     rounds += 1

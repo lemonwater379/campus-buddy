@@ -39,6 +39,13 @@ with zipfile.ZipFile(JAR) as zin, zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED
             continue
         zout.writestr(item, zin.read(item.filename))
         kept += 1
+    # 目录条目必须保留（BUILD-NOTES：缺目录条目会让 Spring 扫不到类；
+    # static 树虽不含类，也按同一规则补齐，避免目录条目数与原 jar 不一致）。
+    dist_dirs = sorted({os.path.dirname(PREFIX + rel) for rel in
+                        (os.path.relpath(os.path.join(r, f), DIST).replace(os.sep, "/")
+                         for r, _, fs in os.walk(DIST) for f in fs)} | {PREFIX.rstrip("/")})
+    for d in dist_dirs:
+        zout.writestr(zipfile.ZipInfo(d + "/"), b"")
     for name, path in sorted(dist_files.items()):
         zout.write(path, name)
 print(f"kept={kept} dropped_static={dropped} added_static={len(dist_files)}", flush=True)

@@ -12,10 +12,17 @@ import java.util.List;
 public class SweepService {
     private final JdbcTemplate jdbc;
     private final BuddyService buddy;
+    /** 阶段二 CEM-08：出勤快照补建与核对期届满定版。 */
+    private final AttendanceService attendance;
+    /** 阶段三 CEM-10：信用结算、事实更正重算与缺席审查扫描。 */
+    private final CreditService credit;
 
-    public SweepService(JdbcTemplate jdbc, BuddyService buddy) {
+    public SweepService(JdbcTemplate jdbc, BuddyService buddy, AttendanceService attendance,
+                        CreditService credit) {
         this.jdbc = jdbc;
         this.buddy = buddy;
+        this.attendance = attendance;
+        this.credit = credit;
     }
 
     @Scheduled(fixedDelayString = "${app.sweep-seconds:10}000")
@@ -45,5 +52,22 @@ public class SweepService {
         // 任务 8：白天补发夜间暂缓的递补邀请（夜间空缺等白天补发给候补第 1 名）。
         // backfillDaytimeInvites 内部先判白天，夜间直接返回。
         try { buddy.backfillDaytimeInvites(now); } catch (Exception e) { /* 下一轮重试 */ }
+        // 阶段二 CEM-08：出勤快照补建与核对期届满定版。失败下轮重试。
+        try { attendance.sweepAttendance(now); } catch (Exception e) { /* 下一轮重试 */ }
+        // 阶段三 CEM-10：信用结算、事实更正重算与缺席审查扫描。失败下轮重试。
+        try { credit.settleSweep(now); } catch (Exception e) { /* 下一轮重试 */ }
+    }
+
+    /** 阶段一 B-CEM-07：通知发件箱发布任务。业务写入 PENDING，这里在 publish_at
+     *  到期后翻为 PUBLISHED；高频短间隔执行，让通知列表 ≤1 秒内可见。异常吞掉下轮重试。 */
+    @Scheduled(fixedDelay = 500)
+    public void publishOutbox() {
+        try {
+            jdbc.update("UPDATE notification SET status='PUBLISHED' " +
+                            "WHERE status='PENDING' AND publish_at <= ?",
+                    java.sql.Timestamp.valueOf(LocalDateTime.now()));
+        } catch (Exception e) {
+            // 下一轮重试
+        }
     }
 }

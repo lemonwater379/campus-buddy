@@ -47,6 +47,16 @@ public class AuthService {
         var row = rows.get(0);
         if (!"ACTIVE".equals(row.get("status"))) return null;
         if (!verify(password, (String) row.get("password_hash"))) return null;
+        // 阶段四 CEM-09（2026-11-15）：密码校验通过后再查封禁，避免向密码错误者泄露封禁状态。
+        var bans = jdbc.queryForList(
+                "SELECT reason, expires_at FROM user_ban WHERE user_id=? AND lifted_at IS NULL",
+                row.get("id"));
+        if (!bans.isEmpty()) {
+            Object reason = bans.get(0).get("reason");
+            Object expiresAt = bans.get(0).get("expires_at");
+            throw new IllegalStateException("账号已被封禁：" + reason + "（至 " + expiresAt
+                    + "）。如需申诉，可在登录页提交封禁复核申请。");
+        }
         String token = UUID.randomUUID().toString();
         sessions.put(token, ((Number) row.get("id")).longValue());
         return token;
@@ -60,6 +70,17 @@ public class AuthService {
     public Map<String, Object> me(Long userId) {
         return jdbc.queryForMap(
                 "SELECT id, account, nickname, role, status FROM app_user WHERE id = ?", userId);
+    }
+
+    /** 阶段一 A5：资料修改（当前只有昵称）。规则与注册一致：非空、1-30 字（按码点计）。
+     *  校验失败抛 ValidationException，由 v1 controller 映射为 400 + fieldErrors.nickname。 */
+    public Map<String, Object> updateNickname(long userId, String nickname) {
+        if (nickname == null || nickname.isBlank())
+            throw new ValidationException("nickname", "昵称需为 1-30 字");
+        if (nickname.codePointCount(0, nickname.length()) > 30)
+            throw new ValidationException("nickname", "昵称需为 1-30 字");
+        jdbc.update("UPDATE app_user SET nickname=? WHERE id=?", nickname, userId);
+        return me(userId);
     }
 
     /** 任务 10（2026-11-09）：改密码。校验原密码、新密码符合 SDD 规则

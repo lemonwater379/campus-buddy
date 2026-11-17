@@ -5,7 +5,7 @@
 """
 import json, os, sys, time, urllib.request, urllib.error
 
-BASE = os.environ.get("BASE_URL", "http://127.0.0.1:8080") + "/api"
+BASE = os.environ.get("BASE_URL", "http://127.0.0.1:8080") + "/api/v1"
 from datetime import datetime, timedelta
 # 活动时间取相对日期，避免写死日期过期导致创建被拒（2026-11-08 首次过期：截止 11-07 已过）。
 # 形状与旧写死值一致：截止=明天 20:00，开始=后天 20:00，结束=后天 22:00。
@@ -18,19 +18,27 @@ results = []
 def check(name, cond, detail=""):
     results.append(bool(cond)); print(("PASS" if cond else "FAIL"), "-", name, detail)
 def req(method, path, token=None, body=None):
+    """v1 统一返回体：返回 data，并注入兼容键 ok/error，尽量不改原断言。"""
     r = urllib.request.Request(BASE + path, method=method,
         data=json.dumps(body).encode() if body is not None else None,
         headers={"Content-Type": "application/json", **({"Authorization": "Bearer " + token} if token else {})})
     try:
-        with urllib.request.urlopen(r) as resp: return json.loads(resp.read())
+        with urllib.request.urlopen(r) as resp: env = json.loads(resp.read())
     except urllib.error.HTTPError as e:
-        try: return json.loads(e.read())
+        try: env = json.loads(e.read())
         except Exception: return {"ok": False, "error": f"HTTP {e.code}"}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    d = env.get("data")
+    out = dict(d) if isinstance(d, dict) else {}
+    out["ok"] = bool(env.get("success"))
+    out["error"] = env.get("message")
+    return out
 def login(a, p="123456"):
     d = req("POST", "/login", body={"account": a, "password": p}); assert d.get("ok"), d; return d["token"]
-def my(t): return req("GET", "/my", token=t)
+def my(t): return req("GET", "/my?pageSize=100", token=t)
 def mine_for(t, aid):
-    rows = [p for p in my(t) if p["activity_id"] == aid]; return rows[0] if rows else None
+    rows = [p for p in my(t).get("items", []) if p["activity_id"] == aid]; return rows[0] if rows else None
 
 try:
     _tok = login("organizer")
@@ -67,8 +75,14 @@ m = mine_for(u1, aid)
 check("退出后候补收到待确认邀请", m["status"] == "INVITED" and m["invitation_id"], str(m))
 acc = req("POST", f"/invitations/{m['invitation_id']}/accept", token=u1)
 check("接受邀请转正式", acc.get("my_status") == "FORMAL", str(acc))
-n = req("GET", "/notifications", token=u1)
-check("新同学收到邀请/报名通知", len(n["list"]) >= 2, f"通知 {len(n['list'])} 条")
+# outbox 异步发布（SDD 允许 5 秒内可见，本实现发布任务 500ms）：轮询最多 3 秒。
+n = {"items": []}
+for _ in range(15):
+    n = req("GET", "/notifications?pageSize=100", token=u1)
+    if len(n["items"]) >= 2:
+        break
+    time.sleep(0.2)
+check("新同学收到邀请/报名通知", len(n["items"]) >= 2, f"通知 {len(n['items'])} 条")
 req("POST", "/notifications/read-all", token=u1)
 check("通知全部已读后未读为 0", req("GET", "/notifications", token=u1)["unread"] == 0)
 
@@ -87,7 +101,7 @@ check("超时后 demo03 邀请过期", m3b["status"] == "EXPIRED", str(m3b))
 # 6 退出后重新报名（前端新增的重新报名入口对应的接口）
 re = req("POST", f"/activities/{aid}/signup", token=d3)
 check("过期后重新报名成功（复用同一记录、不产生第二条）",
-      re.get("my_status") in ("FORMAL", "WAITING") and len([p for p in my(d3) if p["activity_id"] == aid]) == 1, str(re))
+      re.get("my_status") in ("FORMAL", "WAITING") and len([p for p in my(d3)["items"] if p["activity_id"] == aid]) == 1, str(re))
 
 # 7 组织者取消活动
 c = req("POST", f"/activities/{aid}/cancel", token=org)

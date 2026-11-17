@@ -220,7 +220,7 @@ SELECT
 - 按“天”随机，不按“人”随机：每天运行前抛一次硬币，当天 6 名用户
   全部测抽中的版本（用户之间会互相交互，拆到两个库上流程就测不了）。
 - 抽签结果与种子记入 `runs/<日期>/ab-assignment.md` 与当日 digest。
-- QA 每天对两个库都跑后端测试（46/46）；用户与移动端测试只跑当天
+- QA 每天对两个库都跑后端测试（80/80：test_api 49、test_full_flow 16、test_audit 15）；用户与移动端测试只跑当天
   抽中的版本。
 - MySQL 没就绪时，循环照常只跑 PostgreSQL 并在报告里注明。
 
@@ -254,11 +254,17 @@ SELECT
 10. **MySQL 8.0.28**：阿里云镜像 MySQL-8.0/ 目录最高只有 8.0.28，
     glibc2.17 只有 minimal 包，因此用的是 8.0.28 glibc2.12 完整包
     （MD5 已验证）。仍是官方 MySQL 8.0.x，满足 SDD 的 MySQL 8 要求。
+11. **VM 重置后 MySQL 启动失败（2026-11-13 第三次重置）**：旧 mysqld
+    已死，但数据目录残留 `mysql.sock` / `mysql.sock.lock`（旧 pid），
+    新 mysqld 报 `Another process ... is using unix socket file` 而
+    Aborting。启动前先删这两个残留文件（`rm -f .../mysql-data/mysql.sock
+    .../mysql.sock.lock /tmp/mysqlx.sock`），数据本身不受影响（InnoDB
+    初始化与 XA crash recovery 均正常完成）。
 
 ## 验证记录（2026-11-06 首次双库验证，jar 24,890,644 字节）
 
 - A 版：后端测试 46/46（test_api 15、test_full_flow 16、test_audit 15），
-  移动端 16/16。
+  移动端 16/16。（2026-11-06 首次验证记录；test_api 于 2026-11-15 扩充至 49 项，现行标准为双库各 80/80。）
 - B 版：后端测试 46/46，移动端 16/16。
 - 隔离：A 新建活动 B 查不到；恢复 A 快照后 B 计数不变（21/4/11/0/0/0，
   4 个活动含移动端测试发布的那 1 个）；端口与日志互不干扰

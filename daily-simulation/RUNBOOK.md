@@ -187,7 +187,7 @@ campus-buddy-qa、superpowers-verification-before-completion、webapp-testing
   复现不出来的先写明复现尝试与结论，不凭猜测改代码。改动记入
   `runs/YYYY-MM-DD/changes.md`（复现方法、根因、改了什么、证据）。
 - 测试（陈诺）独立复核：后端测试在两个库上都跑（A 版 8080、B 版 8081，
-  各 46/46；测试参数 INVITE_TTL=10 SWEEP_SECONDS=2，BASE_URL 换端口）、
+  各 80/80；测试参数 INVITE_TTL=10 SWEEP_SECONDS=2，BASE_URL 换端口）、
   移动端测试 16/16（只跑当天抽中的本地版本——新代码在本地，服务器版是
   已部署的旧 jar，测它验不到当日改动）、数据库不变量复核（容量、
   唯一约束、重复/孤儿全 0，两库各查一遍，MySQL 用 NOW()）；不通过打回。
@@ -226,6 +226,9 @@ campus-buddy-qa、superpowers-verification-before-completion、webapp-testing
 把累计改动推 GitHub（lemonwater379/campus-buddy，main）。授权不变，
 只改节奏。2026-11-13 已补同步 11-12、11-13 两轮；计数从 2026-11-14
 起算（第 1 轮 11-14、第 2 轮 11-15，11-15 轮末同步），以此类推。
+**2026-11-17 用户追加：腾讯云服务器（43.143.97.80）纳入同步**——同步轮
+部署目标为 Azure + 腾讯云两台（同一个 jar），GitHub 推送不变；本条在
+2026-11-17 当轮运行中途记录，最迟自下一同步轮（2026-11-19）起执行。
 
 1. **每轮都做**：第 5 步后，把当日改动文件清单（代码、测试、TEAM.md、
    RUNBOOK.md、DECISIONS.md、REQUIREMENTS.md、DUAL-DB.md、
@@ -245,6 +248,19 @@ campus-buddy-qa、superpowers-verification-before-completion、webapp-testing
      首页可打开。部署只换 jar、不动数据库（SeedRunner 只在空库播种，
      线上有数据时不动；无结构改动时直接换 jar，有迁移时先在本地
      双库验过再部署）。
+   - 腾讯云部署（2026-11-17 起）：把同一个 jar（md5 与 Azure 部署的
+     一致）用同样流程部署到腾讯云 43.143.97.80——走
+     `~/workspace/scripts/tencent-ssh.sh` / `tencent-scp.sh`，先备份旧
+     jar，再上传、重启 campus-buddy 服务；在服务器本机验
+     /api/health（ok 且 users/activities 与部署前一致）与 demo01 登录。
+     **注意：腾讯云服务跑的 jar 是 `/opt/campus-buddy/campus-buddy.jar`
+     （systemd ExecStart），不是 `/home/ubuntu/campus-buddy-1.0.0.jar`；
+     只传到 /home/ubuntu 下重启无效（2026-11-17 教训：重启后首页仍是
+     旧 JS）。部署时须 `sudo cp` 新 jar 到 /opt 路径再重启，并核对
+     首页 JS 文件名是新构建的哈希。**
+     腾讯云公网 80/8080 端口截至 2026-11-17 尚待用户在控制台放行安全
+     组，公网首页可达性不作部署成败判据；有迁移时先给腾讯云库做快照，
+     迁移口径与 Azure 相同。
    - GitHub：按 `/opt/hatch/connectors/github/references/snapshot-push.md`
      走：先用 `list_commits` 核对远端 main 的 head 与同步记录
      `~/workspace/campus-buddy.muse-github-snapshot-sync.json` 最新一条

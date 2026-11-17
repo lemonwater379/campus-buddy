@@ -56,14 +56,16 @@ def run_android(p):
     check("Android: my activities", "羽毛球" in pg.locator("main").inner_text())
     nav(pg, "通知"); pg.wait_for_timeout(1000)
     check("Android: notifications page", True)
-    pg.get_by_role("button", name="退出").click(); pg.wait_for_timeout(800)
+    # UI 工作流 2026-11-16：退出收进用户菜单/移动菜单，文案为「退出登录」，走 nav() 到达。
+    nav(pg, "退出登录"); pg.wait_for_timeout(800)
     # 任务 19：退出后登录页重建，演示折叠恢复默认收起，重新点开展开再选账号。
     pg.locator("details.demo-login summary").click()
     pg.locator("#quick-account").select_option(label="组织者")
     pg.get_by_role("button", name="以该身份进入").click(); pg.wait_for_timeout(1200)
     nav(pg, "发布活动"); pg.wait_for_timeout(800)
     pg.locator("input").nth(3).fill("安卓手机测试") if False else None
-    # publish form: inputs in order title, location, capacity, deadline, start, end, description, conditions
+    # publish form: inputs in order title, location, capacity, deadline, start, end;
+    # description / conditions are textareas (2026-11-16 T11), no longer inputs.
     inputs = pg.locator("section.card input")
     inputs.nth(0).fill("安卓手机测试")
     inputs.nth(1).fill("操场")
@@ -71,7 +73,8 @@ def run_android(p):
     inputs.nth(3).fill(DEADLINE)
     inputs.nth(4).fill(START)
     inputs.nth(5).fill(END)
-    inputs.nth(6).fill("手机端发布测试")
+    # 2026-11-16 T11：介绍/条件改为 textarea；只填介绍（与改前同一文案同一断言）。
+    pg.locator(".publish-form textarea").nth(0).fill("手机端发布测试")
     # 2026-11-14 T10：类别默认「请选择」，不选不让提交；测试须像真实用户一样先选类别。
     pg.locator(".publish-form select").select_option("桌游")
     # 11-09 任务 23：同名标题会弹非阻塞确认；测试重复跑同一天时会撞上同名，

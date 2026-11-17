@@ -56,10 +56,41 @@ public class SeedRunner implements CommandLineRunner {
         return jdbc.queryForObject("SELECT id FROM app_user WHERE account=?", Long.class, account);
     }
 
+    /** 阶段四 CEM-09（2026-11-15）：每次启动确保演示管理员存在。
+     *  app_user / administrator 已有行（含 enabled=0）一律不动：撤销过的管理员
+     *  不得被重启自动复职。 */
+    private void ensureAdmins() {
+        ensureAdmin("admin", "管理员");
+        ensureAdmin("admin2", "管理员二");
+    }
+
+    private void ensureAdmin(String account, String nickname) {
+        var rows = jdbc.queryForList("SELECT id FROM app_user WHERE account=?", account);
+        long id;
+        if (rows.isEmpty()) {
+            jdbc.update("INSERT INTO app_user(account, password_hash, nickname) VALUES (?,?,?)",
+                    account, AuthService.hash("123456"), nickname);
+            // 按账号查回，不用 SELECT MAX(id)（并发/序列推进时会串位）。
+            id = userId(account);
+        } else {
+            id = ((Number) rows.get(0).get("id")).longValue();
+        }
+        Integer exists = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM administrator WHERE user_id=?", Integer.class, id);
+        if (exists == null || exists == 0) {
+            jdbc.update("INSERT INTO administrator(user_id, enabled, authorized_at, authorization_note) " +
+                            "VALUES (?, 1, ?, '种子管理员（本地演示，部署须改密）')",
+                    id, Timestamp.valueOf(LocalDateTime.now()));
+        }
+    }
+
     @Override
     public void run(String... args) {
         Integer n = jdbc.queryForObject("SELECT COUNT(*) FROM app_user", Integer.class);
-        if (n != null && n > 0) return;
+        if (n != null && n > 0) {
+            ensureAdmins();
+            return;
+        }
         String hash = AuthService.hash("123456");
         jdbc.update("INSERT INTO app_user(account, password_hash, nickname) VALUES ('organizer', ?, '组织者小陈')", hash);
         for (int i = 1; i <= 20; i++) {
@@ -80,7 +111,7 @@ public class SeedRunner implements CommandLineRunner {
                 "水平不限，免费参加；自带球拍，没有球拍可提前说一声",
                 "江安校区体育馆三楼", 4, now, 0);
         long b = createActivity(org, "桌游之夜", "桌游",
-                "轻松桌游夜，有主持人带玩，新手友好，欢迎一个人来；狼人杀、卡坦岛、剧本杀轮着玩。",
+                "本周玩卡坦岛。轻松桌游夜，有主持人带玩，新手友好，欢迎一个人来；狼人杀、卡坦岛、剧本杀轮着玩。",
                 "水平不限，免费参加；自带想玩的桌游也可以",
                 "江安校区活动中心201", 4, now, 2);
         long c = createActivity(org, "学习组", "学习组",
@@ -105,5 +136,6 @@ public class SeedRunner implements CommandLineRunner {
         for (int i = 1; i <= 2; i++)
             jdbc.update("INSERT INTO participation(activity_id, user_id, status, joined_at, updated_at) VALUES (?,?, 'FORMAL', ?, ?)",
                     c, userId("demo" + String.format("%02d", i)), Timestamp.valueOf(now), Timestamp.valueOf(now));
+        ensureAdmins();
     }
 }
