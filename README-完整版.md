@@ -35,7 +35,7 @@ Maven 走阿里云镜像，npm 走 npmmirror；前端打包进后端 Jar，不�
 
 1. 装 JDK 17、PostgreSQL 16；新建数据库：`psql -U postgres -c "CREATE DATABASE campus_buddy ENCODING 'UTF8';"`
 2. 解压后进 `运行包`，双击 `run.bat`，浏览器打开 http://localhost:8080
-3. 演示账号密码都是 `123456`：组织者 `organizer`，同学 `demo01` … `demo20`
+3. 演示账号密码都是 `Dazi@2026!`：组织者 `organizer`，同学 `demo01` … `demo20`
 
 演示顺序（对应 PPT 第 7 页）：羽毛球活动（上限 4，已有 3 正式）→ 第 4 人报名转正式，第 5 人候补第 1 → 第 4 人退出 → 候补第 1 收到限时邀请 → 接受转正式，或等超时自动顺延。
 

@@ -33,6 +33,9 @@ CREATE TABLE IF NOT EXISTS activity (
     end_time     DATETIME NOT NULL,
     status       VARCHAR(10) NOT NULL DEFAULT 'OPEN'
                  CHECK (status IN ('OPEN', 'READY', 'RUNNING', 'ENDED', 'CANCELLED')),
+    -- 2026-11-17：活动封面图（站内相对路径 /img/cover-N.webp 或 /uploads/<uuid>.<ext>；
+    -- NULL = 前端按活动 id 轮换默认封面）。
+    cover_url    VARCHAR(255) NULL,
     created_at   DATETIME NOT NULL DEFAULT NOW(),
     updated_at   DATETIME NOT NULL DEFAULT NOW(),
     CHECK (deadline <= start_time AND start_time < end_time)

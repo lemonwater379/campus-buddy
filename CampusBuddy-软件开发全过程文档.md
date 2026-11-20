@@ -120,7 +120,7 @@ PostgreSQL：行锁、唯一约束、事务隔离正是本题的考点，比用�
 - 配置分离：端口、数据库连接、确认窗口、扫描周期全部走环境变量
   （PORT、DB_URL、DB_USER、DB_PASSWORD、INVITE_TTL、SWEEP_SECONDS），不写死路径和密码。
 
-### 3.2 演示数据（密码均为 123456）
+### 3.2 演示数据（密码均为 Dazi@2026!）
 组织者 organizer；同学 demo01–demo20。
 种子活动：A“周六羽毛球双打”上限 4（3 正式）；B“桌游之夜”上限 4（4 正式 + demo05/06 候补）；
 C“周末学习组”上限 10（2 正式）。时间均为相对启动时刻 +2 天截止、+3 天开始。
@@ -202,7 +202,7 @@ Windows 上的浏览器打开方式见 5.1。
 ### 5.1 Windows 演示（推荐，课堂现场）
 1. 装 JDK 17、PostgreSQL 16；新建数据库：`psql -U postgres -c "CREATE DATABASE campus_buddy ENCODING 'UTF8';"`
 2. 解压完整包，进 `运行包`，双击 `run.bat`，浏览器打开 http://localhost:8080。
-3. 演示账号密码均为 123456：organizer、demo01–demo20；页面有快速登录与“恢复演示数据”。
+3. 演示账号密码均为 Dazi@2026!：organizer、demo01–demo20；页面有快速登录与“恢复演示数据”。
 4. 想现场快一点看超时顺延：关掉程序，设 `INVITE_TTL=10`、`SWEEP_SECONDS=2` 再启动。
 
 ### 5.2 演示脚本（对应 PPT 第 7 页，约 3 分钟）

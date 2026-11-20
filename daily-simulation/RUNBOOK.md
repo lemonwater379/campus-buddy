@@ -55,16 +55,16 @@
    `mvn package` 前先跑 `bash daily-simulation/gen-maven-settings.sh`
    重生成这两份 /tmp 文件（脚本只从环境变量读代理凭据，只写 /tmp，
    不进仓库）；依赖会重新下载，构建成功后再继续。
-6. **magpie 网关（2026-11-10 起，Claude Code 必经）**：开发团队编程任务
-   走 `claude -p --permission-mode acceptEdits`，经 yetone/magpie 本地网关（http://127.0.0.1:3425）到
-   用户 OpenCode Go 额度的 DeepSeek V4.1 Flash。网关由 systemd 服务
+6. **magpie 网关（2026-11-10 起，Claude Code 必经；2026-11-20 起主路由改星驰）**：开发团队编程任务
+   走 `claude -p --permission-mode auto`，经 yetone/magpie 本地网关（http://127.0.0.1:3425）到
+   星驰 API 的 GPT-6.1 Sol（`xingchi/gpt-6.1-sol`，用户 2026-11-20 指令：编程任务都用这个、管够）；
+   xingchi 不可用时网关自动 fallback 到 OpenCode Go 的 DeepSeek V4.1 Flash。网关由 systemd 服务
    `magpie.service` 跑 `magpie serve`；虚拟机重置会丢 /etc 下的 unit，
    先跑 `bash ~/workspace/magpie/ensure-magpie.sh`（从当前环境重建
    unit 并拉起，30 秒内验活），再验 `curl -s
-   http://127.0.0.1:3425/v1/models` 应只列出
-   `opencode-go/deepseek-v4.1-flash` 一个模型。网关不通时不要直接改
-   `~/.claude/settings.json` 绕回直连，先修网关；密钥只在
-   `~/.config/magpie` 里，不读不传。
+   http://127.0.0.1:3425/v1/models` 应能列出 `xingchi/gpt-6.1-sol`。网关不通时不要直接改
+   `~/.claude/settings.json` 绕回直连，先修网关；两个 provider 的密钥只在
+   `~/.config/magpie` 里，不读不传。magpie 脱敏（redact）保持开启。
 7. **线上服务器体验环境（2026-11-13 用户指令）**：用户体验固定走 Azure
    线上服务器版。开跑前建 SSH 隧道并验活（直连 22 口会被出口代理重置，
    必须走 ProxyCommand；proxyauth 从 `$https_proxy` 运行时提取，不硬编码）：
@@ -126,13 +126,13 @@ http://127.0.0.1:18080**；2026-11-13 用户指令，体验不再用本地 A/B �
 
 **专属账号（2026-11-09 定，防并行干扰）**：长期用户各固定一个 demo
 账号，只用自己的——沈知行用 organizer、顾晓用 demo01、陆远用 demo05
-（服务器上同名账号、密码同为 123456）；
+（服务器上同名账号、密码同为 Dazi@2026!）；
 任何代理不得用他人专属账号报名/退出/发活动（昨日陆远的 demo05 被沈知行
 代报、通知混入他人操作，均由此引起）；新用户在服务器上现场注册新账号，用固定临时池
 temp01–temp03（见下），不用 demo 账号。digest 核对基线以当日**服务器**快照为准，不拿用户截图里的中途计数当基线。
 
 **临时账号回收复用（2026-11-10 用户指令）**：新用户账号是临时的、固定池
-回收复用，共 3 个——temp01、temp02、temp03（密码均为 123456，与演示账号
+回收复用，共 3 个——temp01、temp02、temp03（密码均为 Dazi@2026!，与演示账号
 一致；种子库里没有这 3 个名，不撞号）。每天 3 名新角色按当日顺序各用一个
 （第 1 个角度用 temp01，第 2 个用 temp02，第 3 个用 temp03），注册时昵称写
 当天角色名。重置靠第 5 步的快照恢复：临时账号及当天的报名、通知、留言、
@@ -178,8 +178,9 @@ campus-buddy-qa、superpowers-verification-before-completion、webapp-testing
 （路径见 TEAM.md「能力配置」）。
 
 - 后端（沈默）、前端（苏晴）按 digest 的任务改代码。编程任务用 Claude Code
-  CLI（`~/.npm-global/bin/claude -p --permission-mode acceptEdits` 非交互模式，
-  模型已锁 DeepSeek flash，走用户 OpenCode Go 额度；密钥不读不传，
+  CLI（`~/.npm-global/bin/claude -p --permission-mode auto` 非交互模式，
+  模型已锁 xingchi/gpt-6.1-sol，走用户星驰 API（管够）；xingchi 不可用时
+  网关自动回落 OpenCode Go 的 DeepSeek flash；密钥不读不传，
   见 TEAM.md「能力配置」）。
   **先复现后修复**：
   每个任务动手前先复现问题（写失败测试，或跑一段复现脚本，或留复现
@@ -245,7 +246,14 @@ campus-buddy-qa、superpowers-verification-before-completion、webapp-testing
      再 scp 新 jar 到 `/home/azureuser/campus-buddy-1.0.0.jar`，
      `sudo systemctl restart campus-buddy`，等 20 秒以上验
      /api/health（ok 且 users/activities 与部署前一致）、demo01 登录、
-     首页可打开。部署只换 jar、不动数据库（SeedRunner 只在空库播种，
+     首页可打开。**登录态写操作验证（2026-11-18 补，P0 教训）：只验健康/
+     demo01 登录/首页不够——11-17 同步只验了这三项，`notification` 表缺
+     001-outbox 迁移两列的回归自部署时已存在而无人发现。部署后当场做一次
+     登录态写操作验证：报一次名、打开一次通知页、发一次留言，逐项 200；
+     组织者视角详情也核对一次。另核对部署涉及的迁移已在服务器库执行
+     （`information_schema.columns` 查列在；当日快照本身缺列时，恢复后须
+     再次补跑迁移，见 runs/2026-11-18/changes-backend.md 任务 1 第二步）。**
+     部署只换 jar、不动数据库（SeedRunner 只在空库播种，
      线上有数据时不动；无结构改动时直接换 jar，有迁移时先在本地
      双库验过再部署）。
    - 腾讯云部署（2026-11-17 起）：把同一个 jar（md5 与 Azure 部署的
@@ -267,6 +275,11 @@ campus-buddy-qa、superpowers-verification-before-completion、webapp-testing
      一致，再 `github push-files` 推待同步清单里的全部文件，成功后
      把新提交 SHA 与清单追加进同步记录（先写 `.tmp-*` 再原子替换），
      再查一次 head 确认，最后清空 `pending-sync-paths.txt`。
+   - 版本标签（2026-11-19 起，版本规则见仓库根 `CHANGELOG.md`）：若本轮
+     有版本变更（pom.xml / package.json / 前端 `APP_VERSION` 三处版本号
+     改动），推送完成后给新 head 打同名 tag（如 `v1.0.0`）并核对标签
+     存在，同时在 `CHANGELOG.md` 补记该版本条目（已随本轮清单推送的
+     除外）。无版本变更的同步轮不打 tag。
 3. GitHub 写操作每次仍会弹出一次审批卡（安全规则，绕不过），由用户点
    一下确认；审批超时、或部署/推送被虚拟机重置打断，记为待同步、
    不阻塞当日交付，**下一轮开跑先补做这次同步，补上后计数重新开始**。

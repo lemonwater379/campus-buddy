@@ -32,15 +32,21 @@ public class ApiSupport {
 
     public ApiSupport(ObjectMapper mapper) { this.mapper = mapper; }
 
-    /** 构造统一返回体。成功：code=OK / message=ok；错误码与文案由调用方给出。 */
+    /** 构造统一返回体，traceId 每次随机生成。成功：code=OK / message=ok；错误码与文案由调用方给出。 */
     public Map<String, Object> envelope(boolean success, String code, String message, Object data) {
+        return envelope(success, code, message, data, UUID.randomUUID().toString());
+    }
+
+    /** 构造统一返回体，使用调用方指定的 traceId（500 日志与响应体需能对上）。 */
+    public Map<String, Object> envelope(boolean success, String code, String message, Object data,
+                                        String traceId) {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("success", success);
         out.put("code", code);
         out.put("message", message);
         out.put("data", deepStringifyIds(data));
         out.put("serverTime", LocalDateTime.now().toString());
-        out.put("traceId", UUID.randomUUID().toString());
+        out.put("traceId", traceId);
         return out;
     }
 
@@ -50,6 +56,11 @@ public class ApiSupport {
 
     public Map<String, Object> error(String code, String message, Object data) {
         return envelope(false, code, message, data);
+    }
+
+    /** 带固定 traceId 的错误返回体（用于已在服务端记日志的异常）。 */
+    public Map<String, Object> error(String code, String message, Object data, String traceId) {
+        return envelope(false, code, message, data, traceId);
     }
 
     /** 序列化为 JSON 字符串响应。 */

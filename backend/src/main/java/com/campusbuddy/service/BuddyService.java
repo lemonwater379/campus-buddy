@@ -295,11 +295,11 @@ public class BuddyService {
         if (!"OPEN".equals(act.get("status"))) {
             // 任务 21（2026-11-11）：已取消活动给出明确文案；READY/RUNNING/ENDED 仍用通用提示。
             if ("CANCELLED".equals(act.get("status")))
-                throw new IllegalStateException("活动已取消，无法报名");
-            throw new IllegalStateException("活动不在报名期");
+                throw new CodedException("ACTIVITY_CANCELLED", "活动已取消，无法报名");
+            throw new CodedException("ACTIVITY_NOT_OPEN", "活动不在报名期");
         }
         if (!now.isBefore(asLocalDateTime(act.get("deadline"))))
-            throw new IllegalStateException("已过报名截止时间");
+            throw new CodedException("SIGNUP_DEADLINE_PASSED", "已过报名截止时间");
         var existing = jdbc.queryForList(
                 "SELECT * FROM participation WHERE activity_id=? AND user_id=?", activityId, userId);
         if (!existing.isEmpty()) {
@@ -462,6 +462,12 @@ public class BuddyService {
         long activityId = ((Number) part.get("activity_id")).longValue();
         jdbc.queryForMap("SELECT id FROM activity WHERE id=? FOR UPDATE", activityId);
         if (!"PENDING".equals(inv.get("status"))) {
+            // 2026-11-18 批次1 F2：EXPIRED 是“已过期未接受”，不是“已应答”；
+            // 对已过期邀请 accept 必须 4xx 提示过期，不能返回 200 让客户端误以为确认成功
+            // （探针 P7-A4-04 实测 sweep 先置 EXPIRED 后 accept 得到 200/OK）。
+            // ACCEPTED / REJECTED 等已应答终态仍按原幂等口径返回当前结果。
+            if (accept && "EXPIRED".equals(inv.get("status")))
+                throw new IllegalStateException("邀请已过期，无法接受，名额已空出");
             return Map.of("invitation_status", inv.get("status"), "note", "该邀请已被处理，返回当前结果");
         }
         LocalDateTime expires = asLocalDateTime(inv.get("expires_at"));
@@ -499,6 +505,11 @@ public class BuddyService {
             notifyOrganizer(((Number) actA.get("organizer_id")).longValue(), userId, activityId, "报名",
                     "「" + nickname(userId) + "」已确认参加活动「" + actA.get("title") + "」，" + activityWhenWhere(actA) + "。",
                     "notify:org:accept:" + invitationId);
+            // 2026-11-18 批次1 F1：REQUIREMENTS 硬约束 4「递补确认——通知本人和组织者」，
+            // 原实现只调用了 notifyOrganizer，本人侧缺一条确认通知（探针 P7-A7-05）。
+            notify(userId, activityId, invitationId, "报名",
+                    "你已确认参加活动「" + actA.get("title") + "」，" + activityWhenWhere(actA) + "。",
+                    "notify:accept:" + invitationId);
         } else {
             jdbc.update("UPDATE invitation SET status='REJECTED', responded_at=? WHERE id=? AND status='PENDING'",
                     ts(now), invitationId);

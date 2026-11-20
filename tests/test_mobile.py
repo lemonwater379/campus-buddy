@@ -2,7 +2,7 @@
 Runs against http://127.0.0.1:8080. Saves screenshots to screenshots/mobile-*.
 Exit 0 only if every step passes; prints PASS/FAIL per step.
 """
-import os, sys, json, urllib.request
+import os, sys, json, re, urllib.request
 from datetime import datetime, timedelta
 from playwright.sync_api import sync_playwright
 
@@ -30,7 +30,11 @@ def nav(pg, name):
     menu = pg.get_by_role("button", name="菜单")
     if menu.count() and menu.first.is_visible():
         menu.first.click(); pg.wait_for_timeout(300)
-    pg.get_by_role("button", name=name).click()  # 不用 exact: 通知按钮带未读数后缀, 如「通知（2 未读）」
+    # 2026-11-18 QA: 名称锚定在开头。菜单按钮未读 > 0 时 aria-label 为
+    # 「菜单，通知未读 N 条」，子串匹配 "通知" 会同时命中菜单按钮与导航按钮，
+    # 触发 strict 冲突（苏晴 11-18 首轮实测中断）。^通知 只命中导航按钮
+    # 「通知」「通知（2 未读）」，不命中菜单按钮。
+    pg.get_by_role("button", name=re.compile("^" + re.escape(name))).click()
 
 def run_android(p):
     b = p.chromium.launch()

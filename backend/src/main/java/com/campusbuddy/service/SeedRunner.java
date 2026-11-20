@@ -10,7 +10,7 @@ import java.sql.PreparedStatement;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
 
-/** 空库时写入演示数据；已有数据时不动。演示账号密码均为 123456。 */
+/** 空库时写入演示数据；已有数据时不动。演示账号密码均为 Dazi@2026!。 */
 @Component
 public class SeedRunner implements CommandLineRunner {
     private final JdbcTemplate jdbc;
@@ -91,7 +91,7 @@ public class SeedRunner implements CommandLineRunner {
             ensureAdmins();
             return;
         }
-        String hash = AuthService.hash("123456");
+        String hash = AuthService.hash("Dazi@2026!");
         jdbc.update("INSERT INTO app_user(account, password_hash, nickname) VALUES ('organizer', ?, '组织者小陈')", hash);
         for (int i = 1; i <= 20; i++) {
             jdbc.update("INSERT INTO app_user(account, password_hash, nickname) VALUES (?, ?, ?)",

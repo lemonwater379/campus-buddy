@@ -81,7 +81,7 @@ def data_of(env):
     return d if isinstance(d, dict) else {}
 
 
-def login(acc, pwd="123456"):
+def login(acc, pwd="Dazi@2026!"):
     s, env = req("POST", "/login", body={"account": acc, "password": pwd})
     assert env.get("success"), f"login {acc} failed: {s} {env}"
     return ok_data(env)["token"]
@@ -174,7 +174,7 @@ def wait_credit_total(token, n, timeout=240):
 
 # ---- CEM-09 新增助手 ----
 
-def login_raw(acc, pwd="123456"):
+def login_raw(acc, pwd="Dazi@2026!"):
     return req("POST", "/login", body={"account": acc, "password": pwd})
 
 
@@ -232,8 +232,10 @@ def main():
     s, env = req("POST", "/demo/reset", token=tok0)
     assert env.get("success"), f"reset failed: {s} {env}"
 
-    admin = login("admin")
-    admin2 = login("admin2")
+    # 管理员 admin/admin2 不在任务 D 范围：本地种子密码仍为 123456（服务器上为独立强密码），
+    # 故此处显式传 123456；login() 默认口径 Dazi@2026! 只适用于演示账号。
+    admin = login("admin", "123456")
+    admin2 = login("admin2", "123456")
     check("种子管理员 admin 可登录且 is_admin", me_user(admin).get("is_admin") is True,
           str(me_user(admin).get("is_admin")))
     check("admin2 亦为管理员", me_user(admin2).get("is_admin") is True,

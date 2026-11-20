@@ -36,7 +36,7 @@ def req(method, path, token=None, body=None):
     out["ok"] = bool(env.get("success"))
     out["error"] = env.get("message")
     return status, out
-def login(a, p="123456"):
+def login(a, p="Dazi@2026!"):
     s, d = req("POST", "/login", body={"account": a, "password": p})
     assert d.get("ok"), d; return d["token"]
 def my(t): return req("GET", "/my?pageSize=100", token=t)[1]

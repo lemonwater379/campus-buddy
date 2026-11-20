@@ -3,6 +3,7 @@ package com.campusbuddy.controller;
 import com.campusbuddy.service.AttendanceService;
 import com.campusbuddy.service.AuthService;
 import com.campusbuddy.service.BuddyService;
+import com.campusbuddy.service.CodedException;
 import com.campusbuddy.service.ConflictException;
 import com.campusbuddy.service.CreditService;
 import com.campusbuddy.service.ForbiddenException;
@@ -11,6 +12,9 @@ import com.campusbuddy.service.IdempotencyService;
 import com.campusbuddy.service.RateLimitException;
 import com.campusbuddy.service.ValidationException;
 import jakarta.servlet.http.HttpServletRequest;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.EmptyResultDataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -19,9 +23,17 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.HttpMediaTypeNotSupportedException;
+import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
+import org.springframework.web.multipart.MaxUploadSizeExceededException;
+import org.springframework.web.multipart.MultipartFile;
 
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.sql.PreparedStatement;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
@@ -37,6 +49,8 @@ import java.util.function.Supplier;
 @RestController
 @RequestMapping("/api/v1")
 public class ApiV1Controller {
+    private static final Logger log = LoggerFactory.getLogger(ApiV1Controller.class);
+
     private final JdbcTemplate jdbc;
     private final AuthService auth;
     private final BuddyService buddy;
@@ -50,6 +64,9 @@ public class ApiV1Controller {
     private final GovernanceService governance;
     /** 仅用于 /demo/reset 的自增序列重置分支（与 BuddyService 同一做法）。 */
     private final boolean mysql;
+    /** 2026-11-17：封面图上传目录（相对路径按应用工作目录解析为绝对路径）。 */
+    @Value("${app.upload-dir:uploads}")
+    private String uploadDir;
 
     public ApiV1Controller(JdbcTemplate jdbc, AuthService auth, BuddyService buddy,
                            IdempotencyService idem, ApiSupport support,
@@ -139,9 +156,34 @@ public class ApiV1Controller {
         return support.json(support.error("ERROR", "参数格式不正确", null), HttpStatus.BAD_REQUEST);
     }
 
+    /** 2026-11-17：multipart 超限会被 Spring 在进入控制器前拦截，单独给明确文案。 */
+    @ExceptionHandler(MaxUploadSizeExceededException.class)
+    public ResponseEntity<String> handleMaxUpload(MaxUploadSizeExceededException e) {
+        String message = "图片不能超过 5MB";
+        return support.json(support.error("VALIDATION", message,
+                Map.of("fieldErrors", Map.of("file", message))), HttpStatus.BAD_REQUEST);
+    }
+
+    // 2026-11-18 批次1 F6 修复：这两个本地具体 handler 必须先于 Exception 兜底命中
+    // （控制器本地 @ExceptionHandler 优先于 GlobalErrorAdvice）。
+    @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
+    public ResponseEntity<String> handleUnsupportedMediaType(HttpMediaTypeNotSupportedException e) {
+        return support.json(support.error("ERROR", "请求内容类型不支持", null), HttpStatus.UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
+    public ResponseEntity<String> handleMethodNotSupported(HttpRequestMethodNotSupportedException e) {
+        return support.json(support.error("ERROR", "请求方法不支持", null), HttpStatus.METHOD_NOT_ALLOWED);
+    }
+
     @ExceptionHandler(Exception.class)
-    public ResponseEntity<String> handleOther(Exception e) {
-        return errorResponse(e);
+    public ResponseEntity<String> handleOther(Exception e, HttpServletRequest req) {
+        // 未被其它 @ExceptionHandler 匹配的异常：服务端记 ERROR（含 traceId 与堆栈），
+        // 响应体用同一 traceId，便于从用户侧报错反查 journal。
+        String traceId = UUID.randomUUID().toString();
+        log.error("未处理异常 traceId={} {} {}", traceId, req.getMethod(), req.getRequestURI(), e);
+        return support.json(support.error("ERROR", "服务器内部错误", null, traceId),
+                HttpStatus.INTERNAL_SERVER_ERROR);
     }
 
     /** 业务异常 → envelope。ValidationException 必须先于其父类 IllegalStateException 判断。 */
@@ -156,6 +198,10 @@ public class ApiV1Controller {
         if (e instanceof ValidationException ve) {
             return support.json(support.error("VALIDATION", ve.getMessage(),
                     Map.of("fieldErrors", ve.fieldErrors())), HttpStatus.BAD_REQUEST);
+        }
+        // CodedException 是 IllegalStateException 子类，必须先于其父类分支判断。
+        if (e instanceof CodedException ce) {
+            return support.json(support.error(ce.code(), ce.getMessage(), null), HttpStatus.BAD_REQUEST);
         }
         if (e instanceof EmptyResultDataAccessException) {
             // 查不到记录（不存在的活动 / 参与记录 / 邀请）是客户端错误，不应返回 500。
@@ -284,6 +330,64 @@ public class ApiV1Controller {
         return v;
     }
 
+    // ---- 2026-11-17：活动封面图 ----
+
+    /**
+     * 取 body 里的封面地址，兼容 snake_case（cover_url）与 camelCase（coverUrl）。
+     * 只接受字符串，其余类型按未提供处理。
+     */
+    private static String coverUrlOf(Map<String, Object> body) {
+        if (body == null) return null;
+        Object v = body.get("cover_url");
+        if (!(v instanceof String)) v = body.get("coverUrl");
+        return v instanceof String s ? s : null;
+    }
+
+    /**
+     * 封面地址校验（创建与改封面共用）：只允许站内 /img/ 或 /uploads/ 开头的
+     * 相对路径，防外链注入；长度不超过 255。空串 / null 表示未设或清除，返回 null。
+     */
+    private static String validateCoverUrl(String v) {
+        if (v == null || v.isBlank()) return null;
+        String s = v.trim();
+        if (s.length() > 255 || !(s.startsWith("/img/") || s.startsWith("/uploads/")))
+            throw new ValidationException("cover_url", "封面地址不合法");
+        return s;
+    }
+
+    /**
+     * 按文件头嗅探真实图片类型，只认 JPEG / PNG / GIF / WebP，不信扩展名与
+     * Content-Type；返回规范扩展名，无法识别返回 null。
+     */
+    private static String sniffImageExt(byte[] b) {
+        if (b == null || b.length < 4) return null;
+        // JPEG：FF D8 FF
+        if ((b[0] & 0xFF) == 0xFF && (b[1] & 0xFF) == 0xD8 && (b[2] & 0xFF) == 0xFF)
+            return ".jpg";
+        // PNG：89 50 4E 47 0D 0A 1A 0A
+        if (b.length >= 8 && (b[0] & 0xFF) == 0x89 && b[1] == 'P' && b[2] == 'N'
+                && b[3] == 'G' && (b[4] & 0xFF) == 0x0D && (b[5] & 0xFF) == 0x0A
+                && (b[6] & 0xFF) == 0x1A && (b[7] & 0xFF) == 0x0A)
+            return ".png";
+        // GIF："GIF8"
+        if (b[0] == 'G' && b[1] == 'I' && b[2] == 'F' && b[3] == '8')
+            return ".gif";
+        // WebP："RIFF" + 偏移 8 处 "WEBP"
+        if (b.length >= 12 && b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F'
+                && b[8] == 'W' && b[9] == 'E' && b[10] == 'B' && b[11] == 'P')
+            return ".webp";
+        return null;
+    }
+
+    /** 上传目录绝对路径（相对路径按应用工作目录解析）。 */
+    private Path resolveUploadDir() {
+        Path path = Paths.get(uploadDir);
+        if (!path.isAbsolute()) {
+            path = Paths.get(System.getProperty("user.dir")).resolve(path);
+        }
+        return path.normalize().toAbsolutePath();
+    }
+
     // ---- 健康 ----
 
     @GetMapping("/health")
@@ -294,6 +398,48 @@ public class ApiV1Controller {
         data.put("users", jdbc.queryForObject("SELECT COUNT(*) FROM app_user", Integer.class));
         data.put("activities", jdbc.queryForObject("SELECT COUNT(*) FROM activity", Integer.class));
         return support.json(support.ok(data), HttpStatus.OK);
+    }
+
+    // ---- 2026-11-17：封面图上传 ----
+
+    /**
+     * POST /api/v1/uploads/image（multipart/form-data，字段名 file）。
+     * 须登录（未登录返回真正的 401，不走 require() 的 400 口径）。
+     * 只按文件头嗅探 JPEG / PNG / GIF / WebP，上限 5MB；UUID 命名落盘，
+     * 返回 /uploads/&lt;文件名&gt; 供活动 cover_url 引用。上传不可回放，不包 idempotent()。
+     */
+    @PostMapping("/uploads/image")
+    public ResponseEntity<String> uploadImage(
+            @RequestParam(value = "file", required = false) MultipartFile file,
+            @RequestHeader(value = "Authorization", required = false) String h) {
+        Long me = auth.userId(h);
+        if (me == null)
+            return support.json(support.error("UNAUTHORIZED", "未登录", null), HttpStatus.UNAUTHORIZED);
+        // 与 require() 同一停用检查：token 发出后被停用的账号也不能上传。
+        if (!"ACTIVE".equals(auth.me(me).get("status")))
+            return support.json(support.error("UNAUTHORIZED", "账号已停用", null), HttpStatus.UNAUTHORIZED);
+        if (file == null || file.isEmpty())
+            throw new ValidationException("file", "请选择要上传的图片");
+        if (file.getSize() > 5L * 1024 * 1024)
+            throw new ValidationException("file", "图片不能超过 5MB");
+        byte[] bytes;
+        try {
+            bytes = file.getBytes();
+        } catch (IOException e) {
+            throw new IllegalStateException("图片读取失败，请重试");
+        }
+        String ext = sniffImageExt(bytes);
+        if (ext == null)
+            throw new ValidationException("file", "仅支持 JPG、PNG、WebP、GIF 图片");
+        Path dir = resolveUploadDir();
+        try {
+            Files.createDirectories(dir);
+            String name = UUID.randomUUID().toString().replace("-", "") + ext;
+            Files.write(dir.resolve(name), bytes);
+            return support.json(support.ok(Map.of("url", "/uploads/" + name)), HttpStatus.OK);
+        } catch (IOException e) {
+            throw new IllegalStateException("图片保存失败，请重试");
+        }
     }
 
     // ---- 账号 ----
@@ -316,14 +462,19 @@ public class ApiV1Controller {
     @PostMapping("/register")
     public ResponseEntity<String> register(@RequestBody Map<String, String> body) {
         String account = body.get("account"), password = body.get("password");
-        if (account == null || account.length() < 4 || account.length() > 32)
-            throw new IllegalStateException("账号需为 4-32 字符");
-        if (password == null || password.length() < 6)
-            throw new IllegalStateException("密码至少 6 位");
+        // 2026-11-18 批次1 F3：长度校验之外还要排除全空白——"    " 能过 4 位长度检查，
+        // 会注册出无法正常使用、昵称也是空白的账号（探针 P1-B1-REG-05/06/10 实测 200）。
+        if (account == null || account.length() < 4 || account.length() > 32 || account.isBlank())
+            throw new IllegalStateException("账号需为 4-32 个非空白字符");
+        if (password == null || password.length() < 6 || password.isBlank())
+            throw new IllegalStateException("密码至少 6 位且不能全为空格");
         // 旧代码不校验昵称长度，超长时数据库 CHECK 报错被 catch 全吞，
         // 统一误报为“账号已存在”。先校验，再按异常原因区分报错。
         String nickname = body.get("nickname");
-        if (nickname == null || nickname.isBlank()) nickname = account;
+        if (nickname == null || nickname.isBlank())
+            nickname = account.codePoints().limit(30)
+                    .collect(StringBuilder::new, StringBuilder::appendCodePoint, StringBuilder::append)
+                    .toString();
         if (nickname.codePointCount(0, nickname.length()) < 1 || nickname.codePointCount(0, nickname.length()) > 30)
             throw new IllegalStateException("昵称需为 1-30 字");
         try {
@@ -583,15 +734,35 @@ public class ApiV1Controller {
             }
             if (capacity == null || capacity < 1 || capacity > 100)
                 errors.put("capacity", "人数上限需为 1-100");
-            String category = body.get("category") instanceof String ? (String) body.get("category") : "其他";
-            if (!Set.of("羽毛球", "桌游", "学习组", "其他").contains(category))
+            // 2026-11-18 批次1 F4/F5：显式传 null 或非字符串不能被静默回落成「其他」/空串，
+            // 否则类型错误的请求也会成功建活动（探针 P1-B1-CREATE-23/27/28/29 实测 200）。
+            // 完全省略 category 时仍按原口径默认「其他」；description/conditions 缺省或 null 视为空。
+            Object categoryRaw = body.get("category");
+            String category;
+            if (!body.containsKey("category")) category = "其他";
+            else category = categoryRaw instanceof String ? (String) categoryRaw : null;
+            if (category == null || !Set.of("羽毛球", "桌游", "学习组", "其他").contains(category))
                 errors.put("category", "类别不合法");
-            String description = body.get("description") instanceof String ? (String) body.get("description") : "";
-            String conditions = body.get("conditions") instanceof String ? (String) body.get("conditions") : "";
-            if (description.codePointCount(0, description.length()) > 2000)
+            Object descriptionRaw = body.get("description");
+            String description = descriptionRaw == null ? ""
+                    : (descriptionRaw instanceof String ? (String) descriptionRaw : null);
+            if (description == null) errors.put("description", "介绍格式不正确");
+            Object conditionsRaw = body.get("conditions");
+            String conditions = conditionsRaw == null ? ""
+                    : (conditionsRaw instanceof String ? (String) conditionsRaw : null);
+            if (conditions == null) errors.put("conditions", "参与条件格式不正确");
+            if (description != null && description.codePointCount(0, description.length()) > 2000)
                 errors.put("description", "介绍不能超过 2000 字");
-            if (conditions.codePointCount(0, conditions.length()) > 500)
+            if (conditions != null && conditions.codePointCount(0, conditions.length()) > 500)
                 errors.put("conditions", "参与条件不能超过 500 字");
+            // 2026-11-17：可选封面（cover_url / coverUrl），非法时并入 fieldErrors；
+            // 空串 / null / 缺失表示不设封面，落库为 NULL。
+            String coverUrl = null;
+            try {
+                coverUrl = validateCoverUrl(coverUrlOf(body));
+            } catch (ValidationException ve) {
+                errors.putAll(ve.fieldErrors());
+            }
             LocalDateTime deadline = null, start = null, end = null;
             try {
                 // 前端 datetime-local 发来东八区墙钟，库里直接存东八区墙钟，
@@ -612,11 +783,12 @@ public class ApiV1Controller {
             // PostgreSQL 驱动后者会把整行都当作生成键返回，getKey() 会因多键报错。
             final int capFinal = capacity;
             final LocalDateTime deadlineFinal = deadline, startFinal = start, endFinal = end;
+            final String coverFinal = coverUrl;
             KeyHolder keyHolder = new GeneratedKeyHolder();
             jdbc.update(con -> {
                 PreparedStatement ps = con.prepareStatement(
-                        "INSERT INTO activity(organizer_id, title, category, description, conditions, location, capacity, deadline, start_time, end_time) " +
-                        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        "INSERT INTO activity(organizer_id, title, category, description, conditions, location, capacity, deadline, start_time, end_time, cover_url) " +
+                        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                         new String[]{"id"});
                 ps.setLong(1, me);
                 ps.setString(2, title);
@@ -628,6 +800,7 @@ public class ApiV1Controller {
                 ps.setTimestamp(8, Timestamp.valueOf(deadlineFinal));
                 ps.setTimestamp(9, Timestamp.valueOf(startFinal));
                 ps.setTimestamp(10, Timestamp.valueOf(endFinal));
+                ps.setString(11, coverFinal);
                 return ps;
             }, keyHolder);
             Long id = keyHolder.getKey().longValue();
@@ -665,6 +838,31 @@ public class ApiV1Controller {
                 throw new IllegalStateException("时间格式不正确");
             }
             return support.json(support.ok(buddy.reschedule(id, me, deadline, start, end)), HttpStatus.OK);
+        });
+    }
+
+    // 2026-11-17：组织者改封面 / 清除回默认。body.cover_url（兼容 coverUrl）为空串
+    // 或 null 表示清除。与 reschedule 同一组织者口径；写接口走幂等包装。
+    @PutMapping("/activities/{id}/cover")
+    public ResponseEntity<String> updateCover(@PathVariable long id,
+            @RequestBody(required = false) Map<String, Object> body,
+            @RequestHeader(value = "Authorization", required = false) String h,
+            HttpServletRequest req) {
+        long me = require(h);
+        String bodyJson = support.toJson(body == null ? Map.of() : body);
+        return idempotent(req, me, "PUT /api/v1/activities/{id}/cover", bodyJson, () -> {
+            var act = jdbc.queryForMap("SELECT organizer_id FROM activity WHERE id=?", id);
+            long organizerId = ((Number) act.get("organizer_id")).longValue();
+            if (organizerId != me)
+                throw new IllegalStateException("只有组织者可以修改封面");
+            String coverUrl = validateCoverUrl(coverUrlOf(body));
+            jdbc.update("UPDATE activity SET cover_url=?, updated_at=? WHERE id=?",
+                    coverUrl, Timestamp.valueOf(LocalDateTime.now()), id);
+            // Map.of 不接受 null value，清除时 cover_url 为 null，改用 LinkedHashMap。
+            Map<String, Object> data = new LinkedHashMap<>();
+            data.put("id", id);
+            data.put("cover_url", coverUrl);
+            return support.json(support.ok(data), HttpStatus.OK);
         });
     }
 

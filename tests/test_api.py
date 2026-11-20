@@ -77,7 +77,7 @@ def items_of(data):
     return []
 
 
-def login(acc, pwd="123456"):
+def login(acc, pwd="Dazi@2026!"):
     s, env = req("POST", "/login", body={"account": acc, "password": pwd})
     assert env.get("success"), f"login {acc} failed: {s} {env}"
     return ok_data(env)["token"]

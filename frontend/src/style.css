@@ -45,6 +45,8 @@ header h1 {
    桌面端用 order 把 nav 排到中间、右组排到最右。 */
 .header-brand { display: flex; align-items: center; gap: 10px; order: 1; flex: none; }
 .header-right { display: flex; align-items: center; gap: 8px; order: 3; flex: none; }
+/* 未登录顶栏右组（2026-11-19）：无中间 nav 吸收空白时，用 auto 左外边距推到右端，与登录后同位置不跳边。 */
+.header-right-anon { margin-left: auto; }
 /* Logo（2026-11-10）：两个搭子小人线条版，陶土橙 + 墨色细线描边，无填充；PWA 图标同款。 */
 .logo { width: 40px; height: 40px; border-radius: 12px; flex: none; }
 header nav { display: flex; gap: 8px; flex-wrap: wrap; order: 2; margin: 0 auto; }
@@ -244,6 +246,7 @@ body.dark .login-page .hero-banner img { filter: brightness(0.55); }
   .hall-card .card-body .badge { margin-bottom: 0; padding: 2px 8px; line-height: 1.3; }
   .hall-card .card-meta { font-size: 14px; line-height: 1.5; }
   .hall-card .card-desc { margin: 1px 0; line-height: 1.25; }
+  .hall-card .card-desc-cond { margin: 1px 0; line-height: 1.25; }
   .hall-card .card-body > button { margin: 2px 8px 0 0; padding: 6px 12px; font-size: 14px; line-height: 1.3; }
 }
 .card-head { display: flex; align-items: flex-start; gap: 12px; }
@@ -329,6 +332,18 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--orange); ou
   display: -webkit-box;
   -webkit-line-clamp: 1;
   line-clamp: 1;
+  -webkit-box-orient: vertical;
+}
+/* 2026-11-18：大厅卡片条件行独立成两行截断（介绍行仍单行，见上方 .card-desc）。 */
+.card-desc-cond {
+  margin: 6px 0;
+  color: var(--grey);
+  font-size: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
   -webkit-box-orient: vertical;
 }
 /* 任务 11（2026-11-12）：搜索空态推荐用普通 div + 按钮，不套边框卡片。 */
@@ -582,14 +597,24 @@ section.card label input, section.card label select, section.card label textarea
 .field-error { color: #863311; font-weight: 600; }
 body.dark .field-error { color: #f0a58c; }
 input[aria-invalid="true"] { border-color: #863311; }
-.pwd-row { display: flex; gap: 8px; align-items: stretch; }
-.pwd-row input { flex: 1; min-width: 0; }
-.pwd-toggle { flex: none; min-height: 44px; margin: 6px 0; }
+.pwd-row { position: relative; margin: 6px 0; }
+.pwd-row input { width: 100%; padding-right: 48px; margin: 0; }
+/* 密码显隐（2026-11-19）：Lucide Eye/EyeOff 图标按钮置于密码框内右侧，热区 44×44。 */
+/* 选择器带 .pwd-row 前缀：需压过 .login button 的 margin-top（登录卡内按钮统一上边距）与全局 button 边距。 */
+.pwd-row .pwd-eye { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 44px; height: 44px; display: flex; align-items: center; justify-content: center; padding: 0; margin: 0; background: transparent; border: none; border-radius: 10px; color: var(--grey); cursor: pointer; }
+.pwd-eye:hover { color: var(--ink); }
+.pwd-eye:focus-visible { outline: 2px solid var(--orange); outline-offset: 1px; }
 .pwd-rules { list-style: none; margin: 4px 0 0; padding: 0; font-size: 13px; color: var(--grey); }
 .pwd-rules li { display: inline-block; margin-right: 14px; }
 .pwd-rules li.ok { color: var(--ink); }
 .pwd-rules li.ok .tick { color: var(--orange); font-weight: 700; }
 .auth-switch-row { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 12px; text-align: center; }
+/* 应用页脚版本号（2026-11-19）：低调小字，登录前后统一可见。 */
+.app-footer { text-align: center; color: var(--grey); font-size: 12px; padding: 20px 0 8px; }
+.app-footer .foot-sep { margin: 0 6px; }
+.site-notice { text-align: center; font-size: 12.5px; letter-spacing: .02em; color: var(--grey); background: var(--orange-soft); padding: 6px 12px; border-bottom: 1px solid var(--orange-line); }
+.app-footer a { color: inherit; text-decoration: none; }
+.app-footer a:hover { text-decoration: underline; }
 .link-btn {
   border: 0; background: transparent; margin: 0; padding: 4px 2px;
   color: #A85A3F; font-weight: 600;
@@ -613,3 +638,139 @@ body.dark .link-btn { color: #f0a58c; }
 .auth-modal-tag { font-weight: 700; font-size: 15px; margin: 0 0 8px; color: var(--ink); }
 .auth-modal-text { margin: 0 0 16px; color: var(--ink); line-height: 1.65; word-break: break-word; }
 body.dark .auth-modal-card { box-shadow: 0 16px 40px rgba(0, 0, 0, 0.6); }
+
+/* ===== 2026-11-17：活动封面选择 / 图库 / 上传 / 预览 =====
+   发布表单与详情页组织者编辑共用；沿用既有令牌，只追加不改旧规则。
+   选项卡三列（移动端仍三列，缩小内边距），选中态陶土色描边 + 浅色底；
+   预览与大厅卡同为 16/7 裁切，圆角 12px，不溢出。 */
+.cover-field { margin: 16px 0 6px; }
+.cover-field .field-label { margin-top: 0; }
+.edit-cover { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line); }
+.cover-picker { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 8px 0 10px; }
+.cover-option {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  margin: 0; padding: 10px 12px; text-align: left;
+  background: var(--paper); border: 1px solid var(--line); border-radius: 12px;
+  min-width: 0;
+}
+.cover-option-title { font-weight: 600; font-size: 15px; color: var(--ink); line-height: 1.4; }
+.cover-option-desc { font-size: 12px; line-height: 1.5; color: var(--grey); }
+.cover-option.active { border-color: #D97757; background: var(--orange-soft); }
+.cover-option.active .cover-option-title { color: #A85A3F; }
+.cover-thumbs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin: 0 0 10px; }
+.cover-thumb {
+  margin: 0; padding: 4px; min-width: 0;
+  background: var(--paper); border: 1px solid var(--line); border-radius: 12px;
+  overflow: hidden;
+}
+.cover-thumb img { display: block; width: 100%; aspect-ratio: 16 / 7; object-fit: cover; border-radius: 8px; }
+.cover-thumb span { display: block; margin-top: 4px; font-size: 12px; line-height: 1.4; color: var(--grey); text-align: center; }
+.cover-thumb.active { border-color: #D97757; background: var(--orange-soft); }
+.cover-thumb.active span { color: #A85A3F; font-weight: 600; }
+.cover-upload { margin-bottom: 10px; }
+.cover-upload input[type="file"] { max-width: 100%; box-sizing: border-box; }
+.cover-upload .field-hint { display: block; margin-top: 4px; }
+.cover-preview { margin-top: 4px; }
+.cover-preview img {
+  display: block; width: 100%; aspect-ratio: 16 / 7; object-fit: cover;
+  border-radius: 12px; overflow: hidden; border: 1px solid var(--line); background: #FAF9F5;
+}
+.cover-preview .field-hint { display: block; margin-top: 6px; }
+@media (max-width: 640px) {
+  .cover-picker { gap: 6px; }
+  .cover-option { padding: 8px; }
+  .cover-option-title { font-size: 14px; }
+  .cover-option-desc { font-size: 11px; }
+  .cover-thumbs { gap: 6px; }
+}
+body.dark .cover-option.active .cover-option-title,
+body.dark .cover-thumb.active span { color: #f4ae94; }
+body.dark .cover-preview img { filter: brightness(0.55) saturate(0.85); }
+
+/* ===== 2026-11-17：详情页行动卡 / 状态卡 / 组织者管理区（UI 工作流第 2 轮） =====
+   只复用现有令牌（--paper / --line / --ink / --grey / --orange / --orange-soft /
+   --orange-line / #863311 / #F0EEE6），深色沿用 body.dark 已有口径。 */
+.signup-card {
+  margin: 6px 0 16px;
+  padding: 16px;
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-sizing: border-box;
+}
+.signup-state-row { margin: 0 0 10px; }
+.signup-state-row .badge { margin: 0; }
+.signup-cols { display: flex; align-items: center; gap: 18px; min-width: 0; }
+.signup-cap { display: flex; align-items: center; gap: 12px; flex: none; min-width: 0; }
+.signup-cap-text { min-width: 0; }
+.signup-card .signup-cap-num { margin: 0; font-size: 19px; font-weight: 700; line-height: 1.4; color: var(--ink); }
+.signup-cap-num .badge { margin: 0; font-size: 14px; padding: 3px 10px; }
+.signup-card .signup-cap-sub { margin: 2px 0 0; font-size: 14px; line-height: 1.5; color: var(--grey); }
+.cap-ring-lg { width: 72px; height: 72px; }
+.signup-main { flex: 1; min-width: 0; }
+.signup-card .signup-countdown { margin: 0 0 8px; font-size: 14px; line-height: 1.6; color: var(--grey); }
+.signup-card .signup-countdown.soon { color: #8F4A33; font-weight: 600; }
+body.dark .signup-countdown.soon { color: #f4ae94; }
+.signup-countdown .badge { margin: 0; }
+.signup-actions { margin: 0 0 2px; }
+.signup-actions button { margin: 0 8px 6px 0; box-sizing: border-box; }
+.signup-actions .primary { display: block; width: 100%; min-height: 44px; margin-right: 0; }
+.signup-card .signup-hint { margin: 6px 0 0; font-size: 14px; line-height: 1.6; color: var(--grey); }
+.status-card {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  background: #F0EEE6;
+  border-left: 3px solid var(--ink);
+  border-radius: 8px;
+  box-sizing: border-box;
+}
+body.dark .status-card { background: #2c2c2a; }
+.status-card-waiting, .status-card-invited { background: var(--orange-soft); border-left-color: var(--orange); }
+.signup-card .status-card-title { margin: 0; font-size: 18px; font-weight: 700; line-height: 1.45; color: var(--ink); }
+.signup-card .status-card-sub { margin: 2px 0 0; font-size: 14px; line-height: 1.6; color: var(--grey); }
+.signup-terminal { padding: 2px 0; }
+.signup-card .signup-terminal-text { margin: 0 0 4px; font-size: 16px; line-height: 1.6; color: var(--ink); }
+.signup-terminal .signup-terminal-link { margin: 0; padding: 2px 0; border: 0; background: transparent; color: #A85A3F; text-decoration: underline; text-underline-offset: 3px; }
+body.dark .signup-terminal .signup-terminal-link { color: #f0a58c; }
+/* 组织者管理区：浅底 + 顶边框 + 通栏分隔（仅组织者视角渲染）。 */
+.organizer-zone {
+  margin: 22px calc(-1 * var(--card-pad-x)) 0;
+  padding: 18px var(--card-pad-x) 6px;
+  background: #F0EEE6;
+  border-top: 1px solid var(--line);
+  box-sizing: border-box;
+}
+body.dark .organizer-zone { background: #20201f; }
+.organizer-zone-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.organizer-zone-head h3 { margin: 0; }
+.organizer-zone-note { font-size: 13px; color: var(--grey); }
+.organizer-summary { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 2px; }
+.organizer-summary span {
+  display: inline-block; padding: 3px 10px;
+  background: var(--paper); border: 1px solid var(--line); border-radius: 999px;
+  font-size: 13px; line-height: 1.5; color: var(--ink);
+}
+.organizer-group { min-width: 0; }
+.organizer-group p { word-break: break-word; }
+.organizer-actions, .organizer-danger { margin: 16px 0 0; padding-top: 12px; border-top: 1px solid var(--line); }
+.organizer-danger { margin-top: 18px; }
+.organizer-danger .warn { margin: 0; }
+/* 确认框双按钮行：沿用 auth-modal 卡片，不新增颜色。 */
+.auth-modal-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; }
+.auth-modal-actions button { margin: 0; }
+.auth-modal-text { white-space: pre-line; max-height: 55vh; overflow-y: auto; }
+@media (max-width: 640px) {
+  .signup-cols { flex-direction: column; align-items: stretch; gap: 12px; }
+  .signup-cap { justify-content: flex-start; }
+  .signup-card .signup-countdown { margin-bottom: 6px; }
+  .signup-actions .primary { width: 100%; }
+}
+.my-gov-details { margin-top: 16px; }
+.my-gov-details > summary { cursor: pointer; padding: 10px 2px; font-weight: 600; list-style: none; }
+.my-gov-details > summary::-webkit-details-marker { display: none; }
+.my-gov-details > summary::before { content: '▸ '; color: var(--grey); }
+.my-gov-details[open] > summary::before { content: '▾ '; }
+/* 任务 16（2026-11-19）：发布表单的「📅 选择」按钮做得更显眼。 */
+.dt-row .picker-btn { background: var(--paper); border-color: var(--orange-line); color: var(--ink); font-weight: 600; }
+.notif-rank-note { margin: 2px 0 0; }
+.msg-action { margin-left: 8px; padding: 6px 12px; font-size: 14px; }

@@ -87,7 +87,7 @@ public class AuthService {
      *  （8–64 位、含字母与数字）后更新散列，并撤销该用户全部旧会话 token
      *  （含当前 token，改完须重新登录；参考 SDD“凭据更新、旧会话撤销在同一事务提交”）。
      *  摘要决定 1（2026-11-11）：演示账号豁免 SDD 密码规则——种子演示账号按
-     *  REQUIREMENTS.md 已知偏差使用 123456，改回 123456 时不做强度拦截。 */
+     *  REQUIREMENTS.md 已知偏差使用 Dazi@2026!，改回 Dazi@2026! 时不做强度拦截。 */
     public void changePassword(long userId, String oldPassword, String newPassword) {
         if (oldPassword == null || oldPassword.isBlank() || newPassword == null || newPassword.isBlank())
             throw new IllegalStateException("请填写原密码与新密码");
@@ -96,7 +96,7 @@ public class AuthService {
         if (!verify(oldPassword, (String) rows.get(0).get("password_hash")))
             throw new IllegalStateException("原密码不正确");
         // 摘要决定 1（2026-11-11）：demo01–demo20 / organizer / temp01–temp03 豁免 SDD 密码规则，
-        // 种子演示账号按 REQUIREMENTS.md 已知偏差使用 123456；普通账号仍走原强度校验。
+        // 种子演示账号按 REQUIREMENTS.md 已知偏差使用 Dazi@2026!；普通账号仍走原强度校验。
         String account = (String) rows.get(0).get("account");
         boolean demoAccount = account != null
                 && account.matches("^(demo(0[1-9]|1[0-9]|20)|organizer|temp0[1-3])$");
