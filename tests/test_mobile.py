@@ -84,7 +84,11 @@ def run_android(p):
     # 11-09 任务 23：同名标题会弹非阻塞确认；测试重复跑同一天时会撞上同名，
     # 点接受继续发布（确认本身是非阻塞提醒，不拦截入库）。
     pg.on("dialog", lambda d: d.accept())
-    pg.get_by_role("button", name="发布", exact=True).click(); pg.wait_for_timeout(1500)
+    pg.get_by_role("button", name="发布", exact=True).click(); pg.wait_for_timeout(1000)
+    confirm_publish = pg.get_by_role("button", name=re.compile("^(确认再发一个|继续发布)$"))
+    if confirm_publish.is_visible():
+        confirm_publish.click()
+    pg.wait_for_timeout(1500)
     check("Android: publish via UI", "安卓手机测试" in pg.locator("main").inner_text())
     pg.screenshot(path=f"{OUT}/mobile-android-publish.png")
     b.close()

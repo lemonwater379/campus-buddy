@@ -113,7 +113,9 @@ def me_user(env):
 
 def signup(token, aid, confirm=False, key=None):
     headers = {"Idempotency-Key": key} if key else None
-    body = {"confirmConflict": True} if confirm else None
+    body = {"conditions_confirmed": True}
+    if confirm:
+        body["confirmConflict"] = True
     return req("POST", f"/activities/{aid}/signup", token=token, body=body, headers=headers)
 
 

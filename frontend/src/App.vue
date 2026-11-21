@@ -18,14 +18,10 @@
         <button v-if="user.is_admin" type="button" class="nav-item nav-mobile-only" :aria-current="view === 'admin' ? 'page' : undefined" @click="go('admin')">治理工作台</button>
         <button type="button" class="nav-item nav-mobile-only" :aria-current="view === 'profile' ? 'page' : undefined" @click="openProfile">个人资料</button>
         <button type="button" class="nav-item nav-mobile-only" :aria-current="view === 'password' ? 'page' : undefined" @click="go('password')">修改密码</button>
-        <button type="button" class="nav-mobile-only" @click="toggleTheme">切换为{{ darkMode ? '浅色' : '深色' }}模式</button>
         <button type="button" class="nav-mobile-only" @click="logout">退出登录</button>
       </nav>
-      <div v-if="!user" class="header-right header-right-anon">
-        <button class="ghost theme-btn" @click="toggleTheme" :aria-pressed="darkMode"><span class="theme-icon">{{ darkMode ? '☀️' : '🌙' }}</span><span class="theme-label">{{ darkMode ? ' 浅色模式' : ' 深色模式' }}</span><span class="theme-label-short">{{ darkMode ? ' 浅色' : ' 深色' }}</span></button>
-      </div>
-      <div v-else class="header-right" :inert="menuOpen">
-        <div ref="userMenu" class="user-menu" @focusout="onUserMenuFocusOut" @keydown.esc.stop="closeUserMenu(true)">
+      <div class="header-right" :class="{'header-right-anon': !user}" :inert="user && menuOpen">
+        <div v-if="user" ref="userMenu" class="user-menu" @focusout="onUserMenuFocusOut" @keydown.esc.stop="closeUserMenu(true)">
           <button ref="userMenuBtn" type="button" class="user-menu-btn" :class="{'account-current': ['profile', 'password', 'admin'].includes(view)}" @click="userMenuOpen = !userMenuOpen" :aria-label="'账户选项：' + user.nickname" :aria-expanded="userMenuOpen" aria-controls="account-actions">
             <span class="user-menu-name">{{ user.nickname }}</span><span aria-hidden="true">▾</span>
           </button>
@@ -34,23 +30,25 @@
             <button v-if="user.is_admin" type="button" :aria-current="view === 'admin' ? 'page' : undefined" @click="userMenuRun(() => go('admin'))">治理工作台</button>
             <button type="button" :aria-current="view === 'profile' ? 'page' : undefined" @click="userMenuRun(openProfile)">个人资料</button>
             <button type="button" :aria-current="view === 'password' ? 'page' : undefined" @click="userMenuRun(() => go('password'))">修改密码</button>
-            <button type="button" @click="userMenuRun(toggleTheme)">切换为{{ darkMode ? '浅色' : '深色' }}模式</button>
             <hr class="user-menu-sep" />
             <button type="button" @click="userMenuRun(logout)">退出登录</button>
           </div>
         </div>
-        <button ref="menuBtn" type="button" class="menu-btn" @click="menuOpen = !menuOpen" :aria-expanded="menuOpen" aria-controls="mobile-nav" :aria-label="unread ? '菜单，通知未读 ' + unread + ' 条' : '菜单'">☰ 菜单<span v-if="unread" class="menu-unread-dot" aria-hidden="true"></span></button>
+        <!-- 任务 2（2026-11-21）：主题开关不再只给未登录态；登录后顶栏保留同一枚按钮，
+             用户菜单与移动抽屉不再重复入口，避免同一状态出现两套开关。 -->
+        <button class="ghost theme-btn" @click="toggleTheme" :aria-pressed="darkMode"><span class="theme-icon">{{ darkMode ? '☀️' : '🌙' }}</span><span class="theme-label">{{ darkMode ? ' 浅色模式' : ' 深色模式' }}</span><span class="theme-label-short">{{ darkMode ? ' 浅色' : ' 深色' }}</span></button>
+        <button v-if="user" ref="menuBtn" type="button" class="menu-btn" @click="menuOpen = !menuOpen" :aria-expanded="menuOpen" aria-controls="mobile-nav" :aria-label="unread ? '菜单，通知未读 ' + unread + ' 条' : '菜单'">☰ 菜单<span v-if="unread" class="menu-unread-dot" aria-hidden="true"></span></button>
       </div>
     </div>
     <div v-if="user && menuOpen" class="nav-backdrop" @click="closeDrawer()"></div>
   </header>
   <div class="site-notice">本网站仅用于课程设计展示使用，不对外开放</div>
   <main :class="{'workspace-main': user && (view === 'hall' || view === 'roster')}" :inert="menuOpen">
-    <div v-if="msg && !authModal.visible" class="msg">{{ msg }}<button v-if="msgAction && msg === msgAction.text" class="ghost msg-action" @click="msgAction.run()">查看我报名的活动</button><button class="msg-close" @click="msg=''" aria-label="关闭提示">×</button></div>
+    <div v-if="msg && !authModal.visible" class="msg" :role="!user && loginHint ? 'alert' : undefined">{{ msg }}<button v-if="msgAction && msg === msgAction.text" class="ghost msg-action" @click="msgAction.run()">查看我报名的活动</button><button class="msg-close" @click="msg=''" aria-label="关闭提示">×</button></div>
     <p v-if="!user && loginHint && view!=='recovery' && view!=='register'" class="hint">还没有账号？<button type="button" class="link-btn" @click="goAuth('register')">注册新账号</button></p>
     <div v-if="withdrawNotice" class="msg withdraw-notice" aria-live="polite">
-      <b>{{ withdrawNotice.text }}</b><span v-if="!resignupBusy">手抖点错了？</span>
-      <button class="primary" :disabled="signupLocked" @click="resignupFromNotice"><b>{{ resignupBusy ? '正在报名…' : '点这里重新报名' }}</b></button>
+      <b>{{ withdrawNotice.text }}</b><span v-if="!withdrawNoticeBusy">手抖点错了？</span>
+      <button class="primary" :disabled="signupLocked" @click="resignupFromNotice"><b>{{ withdrawNoticeBusy ? '正在报名…' : '点这里重新报名' }}</b></button>
     </div>
 
     <section v-if="!user && view!=='recovery' && view!=='register'" class="login-page">
@@ -98,6 +96,9 @@
     </section>
 
     <section v-if="!user && view==='register'" class="register-page">
+      <!-- 任务 1（2026-11-21）：字段级校验失败用页顶大横幅 + 字段提示放大加粗；
+           服务端结果型失败仍走既有居中浮层，两者不叠加。 -->
+      <div v-if="regFormError" class="msg reg-form-error" role="alert" aria-live="assertive">{{ regFormError }}</div>
       <h2 class="login-welcome">欢迎加入找个搭子</h2>
       <p class="meta login-sub">注册后可报名活动、接收递补通知；站内只用昵称展示，不公开联系方式。</p>
       <div class="card auth-card">
@@ -108,10 +109,10 @@
           <p id="reg-account-slot" class="field-slot" :class="{'field-error': regErrors.account}" :role="regErrors.account ? 'alert' : undefined">{{ regErrors.account || '4–32 个字符，区分大小写' }}</p>
           <label class="field-label" for="reg-password">密码（必填）</label>
           <div class="pwd-row">
-            <input id="reg-password" v-model="password" :type="showPwdReg ? 'text' : 'password'" placeholder="8–64 位，含字母与数字" autocomplete="new-password" aria-describedby="reg-password-slot" :aria-invalid="regPwdServerError ? 'true' : undefined" @input="onConfirmInput" />
+            <input id="reg-password" v-model="password" :type="showPwdReg ? 'text' : 'password'" placeholder="8–64 位，含字母与数字" autocomplete="new-password" :aria-describedby="(regPwdError || regPwdServerError) ? 'reg-password-slot' : undefined" :aria-invalid="(regPwdError || regPwdServerError) ? 'true' : undefined" @input="onConfirmInput" />
             <button type="button" class="pwd-eye" :aria-pressed="showPwdReg" :aria-label="showPwdReg ? '隐藏密码' : '显示密码'" @click="showPwdReg = !showPwdReg"><EyeOff v-if="showPwdReg" :size="20" aria-hidden="true" /><Eye v-else :size="20" aria-hidden="true" /></button>
           </div>
-          <p v-if="regPwdServerError" id="reg-password-slot" class="field-slot field-error" role="alert">{{ regPwdServerError }}</p>
+          <p v-if="regPwdError || regPwdServerError" id="reg-password-slot" class="field-slot field-error" role="alert">{{ regPwdError || regPwdServerError }}</p>
           <ul class="pwd-rules">
             <li :class="{ok: pwdRuleLen}"><span class="tick">{{ pwdRuleLen ? '✓' : '○' }}</span> 8–64 位</li>
             <li :class="{ok: pwdRuleLetter}"><span class="tick">{{ pwdRuleLetter ? '✓' : '○' }}</span> 含字母</li>
@@ -181,7 +182,7 @@
     </section>
 
     <section v-if="user && view==='hall'">
-      <div v-if="!searchNoResult" class="hero-banner"><img src="/img/hero.webp" alt="找个搭子：一起打球、玩桌游、学习" /></div>
+      <div v-if="!searchNoResult" class="hero-banner hall-hero"><img src="/img/hero.webp" alt="找个搭子：一起打球、玩桌游、学习" /></div>
       <div class="card hall-tools">
         <input v-model="q" aria-label="搜索活动" placeholder="试试搜：羽毛球、自习" />
         <select v-model="campus" aria-label="按校区筛选">
@@ -208,6 +209,7 @@
       </div>
       <div v-if="!hallLoading && !loadError && !hallSearchIncomplete && !filteredHall.length" class="card empty-state">
         <p>{{ emptyHint }}</p>
+        <button v-if="timeSlot === '凌晨' && !q.trim()" type="button" class="ghost" @click="timeSlot = '晚上 21–24 点'">看看今晚 21–24 点的活动</button>
         <!-- 任务 9（2026-11-18）：搜索 0 结果时给出按类别浏览的出路。 -->
         <p v-if="q.trim()" class="hint">没有含该词的活动，试试按类别浏览：<button class="link-btn" @click="browseCategory('羽毛球')">羽毛球</button> / <button class="link-btn" @click="browseCategory('桌游')">桌游</button> / <button class="link-btn" @click="browseCategory('学习组')">学习组</button> / <button class="link-btn" @click="browseCategory('其他')">其他</button></p>
         <div v-if="!q.trim()" class="card-cover"><img src="/img/hero.webp" alt="" /></div>
@@ -222,12 +224,15 @@
         <button v-if="q" class="ghost" @click="clearSearch">看看最近的活动</button>
       </div>
       <div class="hall-grid">
-        <div v-for="a in filteredHall" :key="a.id" class="card hall-card">
+        <div v-for="a in hallActiveCards" :key="a.id" class="card hall-card">
           <div class="card-cover hall-cover"><img :src="coverImg(a)" alt="" loading="lazy" /></div>
           <div class="card-body">
             <div class="card-head">
               <h3 class="card-title"><button type="button" class="card-title-button" @click="openDetail(a.id)">{{ a.title }} <span class="activity-no">#{{ a.id }}</span> <span v-if="isNewToday(a)" class="badge badge-accent">新发布</span> <span v-if="startsTodayUpcoming(a)" class="badge badge-accent">今天就能去</span> <span v-if="isFull(a)" class="badge badge-full">已满员</span> <span v-if="statusLabel(a)" class="badge badge-full">{{ statusLabel(a) }}</span></button></h3>
-              <canvas class="cap-ring" width="112" height="112" :data-formal="a.formal_count" :data-cap="a.capacity" role="img" :aria-label="'正式 ' + a.formal_count + '/' + a.capacity + ' 人'"></canvas>
+              <span class="cap-ring-wrap" role="img" :aria-label="'正式 ' + a.formal_count + '/' + a.capacity + ' 人'">
+                <canvas class="cap-ring" width="112" height="112" :data-formal="a.formal_count" :data-cap="a.capacity" aria-hidden="true"></canvas>
+                <span class="cap-ring-number" aria-hidden="true">{{ a.formal_count }}/{{ a.capacity }}</span>
+              </span>
             </div>
             <p class="hall-tags">
               <span class="badge">{{ a.category }}</span><span class="badge">{{ a.location }}</span>
@@ -235,7 +240,7 @@
               <span v-else class="badge badge-big">正式 {{ a.formal_count }}/{{ a.capacity }}</span>
               <span v-if="(a.waiting_count ?? 0) > 0" class="badge">候补 {{ a.waiting_count }} 人</span>
             </p>
-            <p class="meta card-meta"><span class="nowrap">报名截止：{{ deadlineHumanPoint(a) }}</span>　<span class="nowrap">{{ deadlineCountdown(a) }}</span>　<span v-if="deadlineIsToday(a) || deadlineIsTomorrow(a)" class="badge badge-accent">{{ deadlineBadgeText(a) }}</span></p>
+            <p class="meta card-meta"><span class="nowrap">报名截止：{{ deadlineHumanPoint(a) }}</span>　<span class="nowrap">{{ deadlineCountdown(a) }}</span>　<span v-if="deadlineIsToday(a) || deadlineIsTomorrow(a)" class="badge badge-accent">{{ deadlineBadgeText(a) }}</span><span v-if="deadlineGapText(a)" class="nowrap deadline-gap">　{{ deadlineGapText(a) }}</span></p>
             <p class="meta card-meta">开始：{{ fmtWeek(a.start_time) }}<span v-if="a.end_time">–{{ fmtHM(a.end_time) }}</span>　组织者：{{ a.organizer_name }}</p>
             <p v-if="a.description" class="card-desc">{{ a.description }}</p>
             <p v-if="a.conditions" class="card-desc-cond">条件：{{ a.conditions }}</p>
@@ -243,6 +248,36 @@
           </div>
         </div>
       </div>
+      <!-- 任务 4（2026-11-21）：已结束活动用原生 details 折叠；默认收起，不占卡片位置。
+           筛选/搜索生效时 hallEndedCards 为空，保持原来的筛选行为。 -->
+      <details v-if="hallEndedCards.length" class="hall-ended-fold">
+        <summary>已结束的活动（{{ hallEndedCards.length }} 个）</summary>
+        <div class="hall-grid">
+          <div v-for="a in hallEndedCards" :key="'ended-' + a.id" class="card hall-card">
+            <div class="card-cover hall-cover"><img :src="coverImg(a)" alt="" loading="lazy" /></div>
+            <div class="card-body">
+              <div class="card-head">
+                <h3 class="card-title"><button type="button" class="card-title-button" @click="openDetail(a.id)">{{ a.title }} <span class="activity-no">#{{ a.id }}</span> <span v-if="isNewToday(a)" class="badge badge-accent">新发布</span> <span v-if="startsTodayUpcoming(a)" class="badge badge-accent">今天就能去</span> <span v-if="isFull(a)" class="badge badge-full">已满员</span> <span v-if="statusLabel(a)" class="badge badge-full">{{ statusLabel(a) }}</span></button></h3>
+                <span class="cap-ring-wrap" role="img" :aria-label="'正式 ' + a.formal_count + '/' + a.capacity + ' 人'">
+                <canvas class="cap-ring" width="112" height="112" :data-formal="a.formal_count" :data-cap="a.capacity" aria-hidden="true"></canvas>
+                <span class="cap-ring-number" aria-hidden="true">{{ a.formal_count }}/{{ a.capacity }}</span>
+              </span>
+              </div>
+              <p class="hall-tags">
+                <span class="badge">{{ a.category }}</span><span class="badge">{{ a.location }}</span>
+                <span v-if="isFull(a) && (a.reserved_count ?? 0) > 0" class="badge badge-big">已占满（正式 {{ a.formal_count }} + 预留 {{ a.reserved_count }}）</span>
+                <span v-else class="badge badge-big">正式 {{ a.formal_count }}/{{ a.capacity }}</span>
+                <span v-if="(a.waiting_count ?? 0) > 0" class="badge">候补 {{ a.waiting_count }} 人</span>
+              </p>
+              <p class="meta card-meta"><span class="nowrap">报名截止：{{ deadlineHumanPoint(a) }}</span>　<span class="nowrap">{{ deadlineCountdown(a) }}</span>　<span v-if="deadlineIsToday(a) || deadlineIsTomorrow(a)" class="badge badge-accent">{{ deadlineBadgeText(a) }}</span><span v-if="deadlineGapText(a)" class="nowrap deadline-gap">　{{ deadlineGapText(a) }}</span></p>
+              <p class="meta card-meta">开始：{{ fmtWeek(a.start_time) }}<span v-if="a.end_time">–{{ fmtHM(a.end_time) }}</span>　组织者：{{ a.organizer_name }}</p>
+              <p v-if="a.description" class="card-desc">{{ a.description }}</p>
+              <p v-if="a.conditions" class="card-desc-cond">条件：{{ a.conditions }}</p>
+              <button @click="openDetail(a.id)">{{ cardButtonText(a) }}</button>
+            </div>
+          </div>
+        </div>
+      </details>
       <div v-if="hallHasMore || hallMoreError" class="card">
         <p v-if="hallMoreError" class="field-hint warn-hint" role="alert">{{ hallMoreError }}<span v-if="q.trim()">；搜索范围尚未读取完整。</span></p>
         <button class="ghost" :disabled="hallMoreBusy || hallLoading" @click="retryMoreHall">{{ hallMoreBusy ? '加载中…' : hallMoreError ? '重试加载更多活动' : '加载更多活动' }}</button>
@@ -257,32 +292,50 @@
           <h3>详情：{{ detail.title }} <span class="activity-no">#{{ detail.activity_id || detail.id }}</span> <span v-if="detail.category" class="badge">{{ detail.category }}</span> <span v-if="statusLabel(detail)" class="badge badge-full">{{ statusLabel(detail) }}</span></h3>
         </div>
         <!-- 2026-11-17：行动卡——状态、名额、截止倒计时与主操作收进同一区域（设计说明书 §6.4.1） -->
-        <div class="signup-card">
-          <div v-if="signupStateBadge(detail)" class="signup-state-row">
-            <span class="badge badge-full">{{ signupStateBadge(detail) }}</span>
-          </div>
-          <div class="signup-cols">
-            <div v-if="detailActionState !== 'terminal' && !(detail.status === 'ENDED' && (detail.my_status === 'FORMAL' || detail.my_status === 'WAITING'))" class="signup-cap">
-              <canvas v-if="detail.formal !== undefined && detail.formal !== null && detail.capacity"
-                class="cap-ring cap-ring-lg" width="144" height="144"
-                :data-formal="detail.formal" :data-cap="detail.capacity" :data-remaining="remainingSeats(detail)"
-                role="img" :aria-label="'还剩 ' + remainingSeats(detail) + ' 个名额'"></canvas>
-              <div class="signup-cap-text">
-                <p class="signup-cap-num">
-                  <span v-if="scarceSeats(detail)" class="badge badge-accent">仅剩 {{ remainingSeats(detail) }} 个名额</span>
-                  <span v-else>还剩 {{ remainingSeats(detail) }} 个名额</span>
-                </p>
-                <p class="signup-cap-sub">正式 {{ detail.formal ?? 0 }} / 容量 {{ detail.capacity ?? 0 }} · 候补 {{ detail.waiting ?? 0 }} 人</p>
+        <div class="signup-card" aria-label="活动报名概览">
+          <div class="signup-summary">
+            <div class="signup-summary-item signup-summary-status" data-signup-section="activity-status">
+              <span class="signup-label">活动状态</span>
+              <span class="signup-summary-value"><span class="badge badge-full">{{ statusLabel(detail) || '报名开放' }}</span></span>
+            </div>
+            <div class="signup-summary-item signup-summary-deadline" data-signup-section="deadline">
+              <span class="signup-label">报名截止</span>
+              <strong class="signup-summary-value">{{ deadlineHumanPoint(detail) }}</strong>
+              <span v-if="deadlineCountdown(detail)" class="signup-summary-countdown" :class="deadlineUrgency(detail)">{{ deadlineCountdown(detail) }}</span>
+              <span v-else-if="deadlinePassed(detail)" class="signup-summary-countdown expired">已截止</span>
+              <span v-if="deadlineGapText(detail)" class="signup-summary-countdown deadline-gap">{{ deadlineGapText(detail) }}</span>
+            </div>
+            <div class="signup-summary-item signup-summary-capacity" data-signup-section="capacity">
+              <span class="signup-label">名额</span>
+              <div class="signup-cap-summary">
+                <span v-if="detail.formal !== undefined && detail.formal !== null && detail.capacity" class="cap-ring-wrap cap-ring-wrap-lg" role="img" :aria-label="'还剩 ' + remainingSeats(detail) + ' 个名额'">
+                  <canvas class="cap-ring cap-ring-lg" width="144" height="144"
+                    :data-formal="detail.formal" :data-cap="detail.capacity" :data-remaining="remainingSeats(detail)"
+                    aria-hidden="true"></canvas>
+                  <span class="cap-ring-number" aria-hidden="true">{{ remainingSeats(detail) }}</span>
+                </span>
+                <div class="signup-cap-text">
+                  <p v-if="!(detail.status === 'ENDED' && (detail.my_status === 'FORMAL' || detail.my_status === 'WAITING'))" class="signup-cap-num">
+                    <span v-if="scarceSeats(detail)" class="badge badge-accent">仅剩 {{ remainingSeats(detail) }} 个名额</span>
+                    <span v-else>还剩 {{ remainingSeats(detail) }} 个名额</span>
+                  </p>
+                  <p v-else class="signup-cap-record">本次活动共 {{ detail.formal ?? 0 }} 人参加</p>
+                  <p class="signup-cap-sub">正式 {{ detail.formal ?? 0 }} / 容量 {{ detail.capacity ?? 0 }} · 候补 {{ detail.waiting ?? 0 }} 人</p>
+                </div>
               </div>
             </div>
-            <!-- 补集：本人已参与且活动已结束，名额数字改为过去时记录行（环随之隐藏，与「还剩 X 个名额」互斥） -->
-            <div v-if="detail.status === 'ENDED' && (detail.my_status === 'FORMAL' || detail.my_status === 'WAITING')" class="signup-cap-sub signup-cap-record">本次活动共 {{ detail.formal ?? 0 }} 人参加</div>
+            <div class="signup-summary-item signup-summary-membership" data-signup-section="membership">
+              <span class="signup-label">本人报名状态</span>
+              <strong v-if="detailActionState === 'signup'" class="signup-summary-value">尚未报名</strong>
+              <strong v-else-if="detailActionState === 'formal'" class="signup-summary-value">✓ 已报名</strong>
+              <strong v-else-if="detailActionState === 'waiting'" class="signup-summary-value">候补中</strong>
+              <strong v-else-if="detailActionState === 'invited'" class="signup-summary-value">待确认</strong>
+              <strong v-else class="signup-summary-value signup-result-value">{{ signupTerminalText(detail) }}</strong>
+            </div>
+          </div>
+          <div class="signup-action-heading" data-signup-section="action"><span class="signup-label">下一步操作</span></div>
+          <div class="signup-cols">
             <div class="signup-main">
-              <p v-if="detailActionState !== 'terminal' && deadlineUrgency(detail) !== 'expired'" class="signup-countdown" :class="deadlineUrgency(detail)">
-                <template v-if="deadlineUrgency(detail) === 'urgent'"><span class="badge badge-full">{{ deadlineCountdown(detail) }}</span><span class="nowrap">{{ deadlineHumanPoint(detail) }} 截止</span></template>
-                <template v-else-if="deadlineUrgency(detail) === 'soon'">报名截止：{{ deadlineHumanPoint(detail) }} <span class="badge badge-accent">{{ deadlineBadgeText(detail) }}</span></template>
-                <template v-else>{{ deadlineCountdownDetail(detail) }}</template>
-              </p>
 
               <!-- 态 1/2/3：未报名且可报名（报名 / 加入候补；组织者报名占正式名额） -->
               <template v-if="detailActionState === 'signup'">
@@ -290,15 +343,12 @@
                   <button class="primary" :disabled="signupPending || signupBusy || resignupBusy" :aria-busy="signupPending || signupBusy || resignupBusy" @click="requestSignup(detail)">{{ signupPending ? '报名中…' : signupBusy ? '提交中…' : resignupBusy ? '正在报名…' : (joinsQueue(detail) ? '加入候补' : '报名') }}</button>
                 </div>
                 <p v-if="detail.roster" class="signup-hint">组织者报名将占用一个正式名额。</p>
-                <p v-else-if="joinsQueue(detail)" class="signup-hint">{{ isFull(detail) ? '名额已满' : '已有候补队列，空缺按原队列顺序递补' }}，加入候补后按报名顺序排队；收到邀请后请在通知的期限内确认。</p>
+                <p v-else-if="joinsQueue(detail)" class="signup-hint">{{ isFull(detail) ? '名额已满' : '已有候补队列，空缺按原队列顺序递补' }}，加入候补后按报名顺序排队；收到递补邀请后请在 2 分钟内确认，超时顺延给下一位。</p>
                 <p v-else class="signup-hint">报名后组织者仅能看到你的昵称，不会索要或公开你的联系方式。</p>
               </template>
 
               <!-- 态 4/5：已报名（进行中时签到行作第二操作行） -->
               <template v-else-if="detailActionState === 'formal'">
-                <div class="status-card">
-                  <p class="status-card-title">✓ 已报名</p>
-                </div>
                 <div v-if="detail.status === 'RUNNING'" class="signup-actions">
                   <p v-if="detail.my_checkin" class="signup-hint">已签到 {{ fmtWeek(detail.my_checkin.checkin_at) }}</p>
                   <button v-else class="primary" @click="doCheckin(detail)">签到</button>
@@ -366,7 +416,7 @@
         <p v-if="detail.description" class="info-line"><span class="info-label">介绍</span>{{ detail.description }}</p>
         <p v-if="detail.conditions" class="info-line"><span class="info-label">条件</span>{{ detail.conditions }}</p>
         <!-- 任务 13（2026-11-20）：条件行下的通用兜底指引，不针对具体活动类型写死。 -->
-        <p v-if="detail.conditions" class="hint condition-fallback">装备、水平等拿不准的，可在下方留言问组织者（仅组织者可见）。</p>
+        <p v-if="hasRealConditions(detail)" class="hint condition-fallback">装备、水平等拿不准的，可在下方留言问组织者（仅组织者可见）。</p>
         <p class="info-line"><span class="info-label">时间</span><b><span class="nowrap">{{ fmtWeek(detail.start_time) }}</span> – <span class="nowrap">{{ fmtWeek(detail.end_time) }}</span></b><span v-if="durationText(detail)">　{{ durationText(detail) }}</span></p>
         <p class="info-line"><span class="info-label">形式</span><b>单次活动</b></p>
         <p class="info-line"><span class="info-label">地点</span><b>{{ detail.location }}</b></p>
@@ -506,7 +556,7 @@
           <p class="hint">正式成员：已占一个名额，可以参加活动。</p>
           <p class="hint">候补：名额满了，先排队；有人退出时按顺序递补。</p>
           <p class="hint">递补：有人退出空出名额时，按候补顺序邀请下一位参加。</p>
-          <p class="hint">预留：已发出递补邀请、等对方确认的名额；对方确认后转为正式，过期则顺延给下一位候补。</p>
+          <p class="hint">预留：已发出递补邀请、等对方确认的名额；对方确认后转为正式，过期（2 分钟内未确认）则顺延给下一位候补。</p>
         </details>
         <div v-if="user && !detail.roster" id="report-box" class="report-box">
           <button v-if="!reportOpen" class="ghost" @click="reportOpen = true">举报</button>
@@ -552,7 +602,7 @@
             <span class="badge badge-big">正式 {{ o.formal_count }}/{{ o.capacity }}</span>
             <span v-if="(o.reserved_count ?? 0) > 0" class="badge">预留 {{ o.reserved_count }}</span><span v-if="(o.waiting_count ?? 0) > 0" class="badge">候补 {{ o.waiting_count }} 人</span>
           </p>
-          <p class="meta card-meta"><span class="nowrap">报名截止：{{ fmtWeek(o.deadline) }}</span>　<span class="nowrap">开始：{{ fmtWeek(o.start_time) }}<span v-if="o.end_time">–{{ fmtHM(o.end_time) }}</span></span>　状态：{{ statusLabel(o) || '报名中' }}</p>
+          <p class="meta card-meta"><span class="nowrap">报名截止：{{ fmtWeek(o.deadline) }}</span>　<span class="nowrap">开始：{{ fmtWeek(o.start_time) }}<span v-if="o.end_time">–{{ fmtHM(o.end_time) }}</span></span>　状态：{{ statusLabel(o) || (isFull(o) ? '已满员' : '报名中') }}</p>
           <button @click="openDetail(o.id)">查看详情</button>
           <button v-if="o.status !== 'CANCELLED'" @click="openRoster(o.id)">查看名单</button>
         </div>
@@ -632,22 +682,44 @@
       </details>
     </section>
 
-    <section v-if="user && view==='profile'" class="card">
-      <h3>个人资料</h3>
-      <p class="meta">账号：{{ user.account }}</p>
-      <p class="hint">昵称会展示给其他活动参与者；联系方式仅用于你本人资料，不会出现在活动详情或名单中。</p>
+    <section v-if="user && view==='profile'" class="card profile-page" aria-labelledby="profile-title">
+      <div class="profile-page-head">
+        <div>
+          <p class="profile-eyebrow">账户设置</p>
+          <h2 id="profile-title">个人资料</h2>
+        </div>
+        <p class="profile-account"><span>账号</span><b>{{ user.account }}</b></p>
+      </div>
       <p v-if="profileLoading" class="hint" role="status">正在读取资料…</p>
-      <p v-if="profileError" class="field-hint warn-hint" role="alert">{{ profileError }}</p>
-      <button v-if="!profileLoading && !profileLoaded" class="ghost" type="button" @click="openProfile">重新读取资料</button>
-      <form @submit.prevent="saveProfile" :aria-busy="profileLoading || profileBusy">
-        <label class="field-label" for="profile-nickname">昵称（必填）</label>
-        <!-- 原生 maxlength 按 UTF-16 单元截断；由 validateProfile 按接口的 Unicode 码点口径校验，保留 IME 输入。 -->
-        <input id="profile-nickname" v-model="profileForm.nickname" :disabled="profileLoading || profileBusy || !profileLoaded" autocomplete="nickname" :aria-invalid="profileErrors.nickname ? 'true' : undefined" aria-describedby="profile-nickname-slot" @input="profileErrors.nickname = ''" />
-        <p id="profile-nickname-slot" class="field-slot" :class="{'field-error': profileErrors.nickname}" :role="profileErrors.nickname ? 'alert' : undefined">{{ profileErrors.nickname || '1–30 字（按 Unicode 码点计）。' }}</p>
-        <label class="field-label" for="profile-contact">联系方式（可选）</label>
-        <input id="profile-contact" v-model="profileForm.contact" :disabled="profileLoading || profileBusy || !profileLoaded" autocomplete="tel" placeholder="手机号、邮箱等（可留空）" :aria-invalid="profileErrors.contact ? 'true' : undefined" aria-describedby="profile-contact-slot" @input="profileErrors.contact = ''" />
-        <p id="profile-contact-slot" class="field-slot" :class="{'field-error': profileErrors.contact}" :role="profileErrors.contact ? 'alert' : undefined">{{ profileErrors.contact || '最多 100 字（按 Unicode 码点计）；留空可清除已保存的联系方式。' }}</p>
-        <button class="primary" type="submit" :disabled="profileBusy || profileLoading || !profileLoaded">{{ profileLoading ? '读取中…' : profileBusy ? '保存中…' : '保存资料' }}</button>
+      <div v-if="profileError && !profileLoaded" class="load-error profile-load-error" role="alert">
+        <p class="field-hint field-error">{{ profileError }}</p>
+        <button v-if="!profileLoading" class="ghost" type="button" @click="openProfile">重新读取资料</button>
+      </div>
+      <button v-else-if="!profileLoading && !profileLoaded" class="ghost profile-retry" type="button" @click="openProfile">重新读取资料</button>
+      <form class="profile-form" @submit.prevent="saveProfile" :aria-busy="profileLoading || profileBusy">
+        <fieldset class="profile-group">
+          <legend>基本信息</legend>
+          <p class="profile-group-note">昵称用于站内展示；账号不可在此修改。</p>
+          <div class="profile-field">
+            <label class="field-label" for="profile-nickname">昵称（必填）</label>
+            <!-- 原生 maxlength 按 UTF-16 单元截断；由 validateProfile 按接口的 Unicode 码点口径校验，保留 IME 输入。 -->
+            <input id="profile-nickname" v-model="profileForm.nickname" :disabled="profileLoading || profileBusy || !profileLoaded" autocomplete="nickname" :aria-invalid="profileErrors.nickname ? 'true' : undefined" aria-describedby="profile-nickname-slot" @input="profileErrors.nickname = ''" />
+            <p id="profile-nickname-slot" class="field-slot" :class="{'field-error': profileErrors.nickname}" :role="profileErrors.nickname ? 'alert' : undefined">{{ profileErrors.nickname || '1–30 字（按 Unicode 码点计）。' }}</p>
+          </div>
+        </fieldset>
+        <fieldset class="profile-group">
+          <legend>联系方式与可见性</legend>
+          <p class="profile-group-note">联系方式不会出现在活动详情或名单中。</p>
+          <div class="profile-field">
+            <label class="field-label" for="profile-contact">联系方式（可选）</label>
+            <input id="profile-contact" v-model="profileForm.contact" :disabled="profileLoading || profileBusy || !profileLoaded" autocomplete="tel" placeholder="手机号、邮箱等（可留空）" :aria-invalid="profileErrors.contact ? 'true' : undefined" aria-describedby="profile-contact-slot" @input="profileErrors.contact = ''" />
+            <p id="profile-contact-slot" class="field-slot" :class="{'field-error': profileErrors.contact}" :role="profileErrors.contact ? 'alert' : undefined">{{ profileErrors.contact || '最多 100 字（按 Unicode 码点计）；留空可清除已保存的联系方式。' }}</p>
+          </div>
+        </fieldset>
+        <div class="profile-actions">
+          <button class="primary" type="submit" :disabled="profileBusy || profileLoading || !profileLoaded">{{ profileLoading ? '读取中…' : profileBusy ? '保存中…' : '保存资料' }}</button>
+          <p v-if="profileError && profileLoaded" class="field-hint field-error profile-save-error" role="alert">{{ profileError }}</p>
+        </div>
       </form>
     </section>
 
@@ -988,7 +1060,9 @@
 
     <section v-if="user && view==='publish'" class="card publish-form">
       <h3>发布活动</h3>
-      <label>标题（必填） <input id="publish-title" v-model="form.title" :aria-invalid="!!publishErrors.title" :aria-describedby="publishErrors.title ? 'publish-title-error' : undefined" placeholder="如：羽毛球友谊赛" @input="publishErrors.title = ''" /><span class="field-hint">必填，最多 50 字</span><span id="publish-title-error" v-if="publishErrors.title" class="field-hint warn-hint" role="alert">{{ publishErrors.title }}</span><span v-if="titleWeekdayHint" class="field-hint warn-hint">{{ titleWeekdayHint }}</span></label>
+      <fieldset class="publish-group">
+        <legend>基本信息</legend>
+      <label>标题（必填） <input id="publish-title" v-model="form.title" :aria-invalid="!!publishErrors.title" :aria-describedby="publishErrors.title ? 'publish-title-error' : undefined" placeholder="如：羽毛球友谊赛" @input="publishErrors.title = ''" /><span id="publish-title-error" v-if="publishErrors.title" class="field-hint warn-hint" role="alert">{{ publishErrors.title }}</span><span class="field-hint">必填，最多 50 字</span><span v-if="titleWeekdayHint" class="field-hint warn-hint">{{ titleWeekdayHint }}</span></label>
       <!-- 任务 18（2026-11-20）：封面选择上移到标题下方，发布前第一眼可见；三选一逻辑不变。 -->
       <div class="cover-field">
         <span class="field-label">活动封面</span>
@@ -1026,13 +1100,16 @@
       </div>
       <label>类别（必填）
         <select id="publish-category" v-model="form.category" :aria-invalid="!!publishErrors.category" :aria-describedby="publishErrors.category ? 'publish-category-error' : undefined" @change="publishErrors.category = ''"><option value="">请选择</option><option>羽毛球</option><option>桌游</option><option>学习组</option><option>其他</option></select>
-        <span class="field-hint">必填</span>
         <span id="publish-category-error" v-if="publishErrors.category" class="field-hint warn-hint" role="alert">{{ publishErrors.category }}</span>
+        <span class="field-hint">必填</span>
         <span v-if="form.category === '其他'" class="field-hint">「其他」类活动：请在标题和介绍里写明关键词，方便别人搜到；转让类请写清人数、时间、价格；招募类请写清招募对象、固定训练时间与选拔方式；运动/兴趣约人请写清场地、水平要求、新手是否友好、有无器材可借；拼单/费用类请把费用与截单时间写进介绍第一行</span>
         <span v-if="form.category === '学习组'" class="field-hint">学习 / 读书类活动：请在介绍里写明书目或学习内容、讨论频率、是否定期</span>
       </label>
-      <label>地点 <input id="publish-location" v-model="form.location" :aria-invalid="!!publishErrors.location" :aria-describedby="publishErrors.location ? 'publish-location-error' : undefined" placeholder="如：江安校区体育馆三楼，提前 10 分钟在一楼大厅集合；拼车请写清出发地和目的地，如：春熙路出发 → 江安校区南门" @input="publishErrors.location = ''" /></label><span class="field-hint">必填，最多 100 字；先写校区，再写场馆与楼层、集合点</span><span id="publish-location-error" v-if="publishErrors.location" class="field-hint warn-hint" role="alert">{{ publishErrors.location }}</span><details class="field-examples"><summary>查看例子</summary><p class="field-hint">请先写校区（望江/华西/江安/其他），再写场馆与楼层；如有电梯/坡道请写明，如：江安校区体育馆三楼，有电梯。拼车请写清出发地和目的地，如：市中心春熙路出发 → 江安校区南门。拼单请写取餐点，如：江安校区六舍楼下取餐点。球场等多片场地的请写清场地号与集合点，如：江安校区体育馆三楼 3 号场门口集合。</p></details>
-      <label>人数上限 <input id="publish-capacity" v-model.number="form.capacity" :aria-invalid="!!publishErrors.capacity" :aria-describedby="publishErrors.capacity ? 'publish-capacity-error' : undefined" type="number" min="1" max="100" @input="publishErrors.capacity = ''" /><span class="field-hint">范围 1–100 人；请按实际需要改人数，默认 4 人（含组织者自己）</span><span id="publish-capacity-error" v-if="publishErrors.capacity" class="field-hint warn-hint" role="alert">{{ publishErrors.capacity }}</span></label>
+      </fieldset>
+      <fieldset class="publish-group">
+        <legend>时间、地点与人数</legend>
+      <label>地点 <input id="publish-location" v-model="form.location" :aria-invalid="!!publishErrors.location" :aria-describedby="publishErrors.location ? 'publish-location-error' : undefined" placeholder="如：江安校区体育馆三楼，提前 10 分钟在一楼大厅集合；拼车请写清出发地和目的地，如：春熙路出发 → 江安校区南门" @input="publishErrors.location = ''" /><span id="publish-location-error" v-if="publishErrors.location" class="field-hint warn-hint" role="alert">{{ publishErrors.location }}</span></label><span class="field-hint">必填，最多 100 字；先写校区，再写场馆与楼层、集合点</span><details class="field-examples"><summary>查看例子</summary><p class="field-hint">请先写校区（望江/华西/江安/其他），再写场馆与楼层；如有电梯/坡道请写明，如：江安校区体育馆三楼，有电梯。拼车请写清出发地和目的地，如：市中心春熙路出发 → 江安校区南门。拼单请写取餐点，如：江安校区六舍楼下取餐点。球场等多片场地的请写清场地号与集合点，如：江安校区体育馆三楼 3 号场门口集合。</p></details>
+      <label>人数上限 <input id="publish-capacity" v-model.number="form.capacity" :aria-invalid="!!publishErrors.capacity" :aria-describedby="publishErrors.capacity ? 'publish-capacity-error' : undefined" type="number" min="1" max="100" @input="publishErrors.capacity = ''" /><span id="publish-capacity-error" v-if="publishErrors.capacity" class="field-hint warn-hint" role="alert">{{ publishErrors.capacity }}</span><span class="field-hint">范围 1–100 人；请按实际需要改人数，默认 4 人（含组织者自己）</span></label>
       <label class="field-label" for="publish-deadline">报名截止（必填）</label>
       <div class="dt-row"><input id="publish-deadline" v-model="form.deadline" :aria-invalid="!!dtErrors.deadline" :aria-describedby="dtErrors.deadline ? 'publish-deadline-error' : undefined" :placeholder="'如：' + todayStr + ' 21:00'" @blur="onDTBlur('deadline')" @input="onDTInput('deadline')" /><button class="ghost picker-btn" type="button" @click="openPicker('form','deadline')">📅 选择</button></div>
       <span id="publish-deadline-error" v-if="dtErrors.deadline" class="field-hint warn-hint" role="alert">{{ dtErrors.deadline }}</span>
@@ -1049,9 +1126,15 @@
       <span id="publish-end_time-error" v-if="dtErrors.end_time" class="field-hint warn-hint" role="alert">{{ dtErrors.end_time }}</span>
       <span class="field-hint">点「📅 选择」打开日历，或直接按「年-月-日 时:分」输入（24 小时制）。</span>
       <span v-if="form.end_time && !dtErrors.end_time" class="field-hint">已选：{{ fmtWeek(form.end_time.replace('T', ' ')) }}</span>
-      <label>介绍 <textarea id="publish-description" v-model="form.description" :aria-invalid="!!publishErrors.description" :aria-describedby="publishErrors.description ? 'publish-description-error' : undefined" rows="3" @input="publishErrors.description = ''" placeholder="如：一起自习，互相监督、互不打扰；活动均为单次，想找固定搭子请写明频率，如：每周三晚固定；轮换玩法请写明本期玩什么，如：本周玩《长夜将明》"></textarea><span class="field-hint">选填，最多 2000 字</span><span id="publish-description-error" v-if="publishErrors.description" class="field-hint warn-hint" role="alert">{{ publishErrors.description }}</span><span class="field-hint warn-hint">介绍是公开的，请勿填写微信号、手机号等联系方式</span></label>
-      <label>参与条件 <textarea id="publish-conditions" v-model="form.conditions" :aria-invalid="!!publishErrors.conditions" :aria-describedby="publishErrors.conditions ? 'publish-conditions-error' : undefined" rows="3" @input="publishErrors.conditions = ''" placeholder="如：水平不限，免费参加；没有球拍可提前说一声；新手友好，有人带，主持人会先教规则，零基础可来；费用请写明，如：AA 场地费 10 元；招募队友请写明水平、每周投入与合作期限，如：招募建模队友，要求会 Python，每周投入 8 小时以上，合作到国赛结束；夜间活动请写明灯光与结伴情况，如：全程路灯明亮，请穿亮色衣服"></textarea><span class="field-hint">选填，最多 500 字</span><span id="publish-conditions-error" v-if="publishErrors.conditions" class="field-hint warn-hint" role="alert">{{ publishErrors.conditions }}</span><span class="field-hint warn-hint">参与条件是公开的，请勿填写微信号、手机号等联系方式</span></label>
-      <button class="primary" :disabled="publishBusy" @click="publish">{{ publishBusy ? '提交中…' : '发布' }}</button>
+      </fieldset>
+      <fieldset class="publish-group">
+        <legend>活动介绍</legend>
+      <label>介绍 <textarea id="publish-description" v-model="form.description" :aria-invalid="!!publishErrors.description" :aria-describedby="publishErrors.description ? 'publish-description-error' : undefined" rows="3" @input="publishErrors.description = ''" placeholder="如：一起自习，互相监督、互不打扰；活动均为单次，想找固定搭子请写明频率，如：每周三晚固定；轮换玩法请写明本期玩什么，如：本周玩《长夜将明》"></textarea><span id="publish-description-error" v-if="publishErrors.description" class="field-hint warn-hint" role="alert">{{ publishErrors.description }}</span><span class="field-hint">选填，最多 2000 字</span><span class="field-hint warn-hint">介绍是公开的，请勿填写微信号、手机号等联系方式</span></label>
+      <label>参与条件 <textarea id="publish-conditions" v-model="form.conditions" :aria-invalid="!!publishErrors.conditions" :aria-describedby="publishErrors.conditions ? 'publish-conditions-error' : undefined" rows="3" @input="publishErrors.conditions = ''" placeholder="如：水平不限，免费参加；没有球拍可提前说一声；新手友好，有人带，主持人会先教规则，零基础可来；费用请写明，如：AA 场地费 10 元；招募队友请写明水平、每周投入与合作期限，如：招募建模队友，要求会 Python，每周投入 8 小时以上，合作到国赛结束；夜间活动请写明灯光与结伴情况，如：全程路灯明亮，请穿亮色衣服"></textarea><span id="publish-conditions-error" v-if="publishErrors.conditions" class="field-hint warn-hint" role="alert">{{ publishErrors.conditions }}</span><span class="field-hint">选填，最多 500 字</span><span class="field-hint warn-hint">参与条件是公开的，请勿填写微信号、手机号等联系方式</span></label>
+      </fieldset>
+      <div class="publish-actions">
+        <button class="primary" :disabled="publishBusy" @click="publish">{{ publishBusy ? '提交中…' : '发布' }}</button>
+      </div>
     </section>
     <footer v-if="user && demoMode" class="page-foot">
       <button class="danger" @click="resetDemo">⚠ 恢复演示数据</button>
@@ -1113,7 +1196,8 @@ const view = ref('hall')
 // 详情页从哪来（大厅 / 我的活动），返回时回到原地（2026-11-10 详情独立页）。
 const detailFrom = ref('hall')
 const menuOpen = ref(false)
-// 顶栏用户菜单（昵称按钮 + 下拉）：本轮不做点外关闭，Esc 关闭并交还焦点。
+// 顶栏用户菜单（昵称按钮 + 下拉）：普通披露；Esc 关闭并把焦点交还昵称按钮，
+// 焦点离开整个账户区时收起（点外/走完菜单项），不抢焦点。
 const userMenuOpen = ref(false)
 const userMenuBtn = ref(null)
 const userMenu = ref(null)
@@ -1167,6 +1251,10 @@ function lockActionKeys(keys) {
 const signupPending = ref(false)
 const resignupBusy = ref(false)
 const signupLocked = computed(() => signupPending.value || signupBusy.value || resignupBusy.value)
+// 任务 7（2026-11-21）：重报握手把 busy 从 resignupBusy 交给 signupPending（条件确认框
+// 打开期间后者为 true）。提示条只认 resignupBusy 会在弹框期间回退成「点这里重新报名」；
+// 呈现层合并两者，请求/确认状态机保持不变。
+const withdrawNoticeBusy = computed(() => resignupBusy.value || signupPending.value)
 // 2026-11-20 任务 2：「还有名额」开关（纯前端过滤，默认关）。
 const onlyHasSeats = ref(false)
 const publishBusy = ref(false)
@@ -1189,9 +1277,11 @@ const loginErrors = ref({ account: '', password: '' })
 const showPwdLogin = ref(false), showPwdReg = ref(false)
 const authReturn = ref(null)
 const regPwdServerError = ref('')
+const regPwdError = ref('')
+const regFormError = ref('')
 const passwordConfirm = ref('')
 const regConfirmError = ref('')
-const authModal = ref({ visible: false, title: '提示', text: '', focusAfter: null, confirmLabel: '', cancelLabel: '', onConfirm: null, onClose: null })
+const authModal = ref({ visible: false, title: '提示', text: '', focusAfter: null, confirmLabel: '', cancelLabel: '', onConfirm: null, onClose: null, confirmed: false })
 const authModalBtn = ref(null)
 const authModalCancelBtn = ref(null)
 const authModalCard = ref(null)
@@ -1352,6 +1442,10 @@ function showMsg(text, ms = 5000) {
   msg.value = text
   // 只有当前 msg 仍是本条文案时才清空：避免旧定时器误删期间直接赋值设置的报错。
   if (ms) setTimeout(() => { if (msgSeq === id && msg.value === text) msg.value = '' }, ms)
+}
+// 认证成功只用非锁屏横幅；退出时也只清这两类已过期的成功提示。
+function isAuthSuccessMsg(text) {
+  return text === '登录成功' || text === '注册成功，已自动登录'
 }
 // G24（2026-11-20）：详情请求序号。切换活动后旧请求迟到返回时按序号丢弃，
 // 避免把上一个活动的详情/错误提示盖到当前页面；同活动刷新同样递增序号（视为最新请求）。
@@ -1636,14 +1730,13 @@ function fmtHM(s) {
   if (!m) return ''
   return `${m[1]}:${m[2]}`
 }
-// 任务 8（2026-11-20）：登录前预览的紧凑时间——星期 + 时段 + HH:MM，如「周三晚上 19:09」。
-// 与大厅卡片同一时间取法（fmtWeek 的星期/时段），只是省略日期，适合预览一行。
+// 批次 C / 任务 16：预览时间补月日；沿用 fmtWeek 的墙钟星期/时段，省略年份。
 function fmtWeekdayHM(s) {
   if (!s) return ''
   const m = String(s).replace('T', ' ').match(/^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2})/)
   if (!m) return fmt(s)
   const d = new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5])
-  return `${WEEK[d.getDay()]}${periodWord(+m[4])} ${m[4]}:${m[5]}`
+  return `${m[2]}-${m[3]} ${WEEK[d.getDay()]}${periodWord(+m[4])} ${m[4]}:${m[5]}`
 }
 // 任务 8/18：服务端时间是东八区墙钟字符串（无时区后缀），浏览器
 // new Date() 会按浏览器本地时区解析——本机 Chromium 是 UTC，会偏 8 小时
@@ -1751,6 +1844,17 @@ const checkinSecondsLeft = computed(() => {
 // 均为改时间通知（id 27/63/91），无旧退出行残留，兼容映射无保留必要。
 // 完整编辑也复用「变更」类型；展示用通用「活动变更」，不再误称只有时间改变。
 function notifTypeText(t) { return t === '变更' ? '活动变更' : t }
+// 任务 3（2026-11-21）：后端候补通知由 inviteWindowText() + " 内确认" 拼成，
+// 会显示「2 分钟 内确认」。前端展示层统一去掉「分钟」与「内」之间的空白；
+// 不改后端文案与 120 秒配置，接口原文仍按原样返回。
+function normalizeNotifContent(content) {
+  return String(content || '').replace(/分钟\s+内/g, '分钟内')
+}
+function normalizeNotif(n) {
+  if (!n || typeof n.content !== 'string') return n
+  const content = normalizeNotifContent(n.content)
+  return content === n.content ? n : { ...n, content }
+}
 // 任务 9：深色模式切换（只用 REA v4 深色 token，见 style.css body.dark）。
 function applyTheme() {
   document.body.classList.toggle('dark', darkMode.value)
@@ -1813,6 +1917,12 @@ function statusLabel(a) {
   if (deadlinePassed(a)) return '报名已截止'
   if (a.status === 'READY') return '报名未开始'
   return ''
+}
+// 任务 8（2026-11-21）：空串 / null / 纯空白 / 「无」都按“没有条件”呈现兜底指引；
+// 只影响该指引的显示，不改条件行原文与确认框的已读条件语义。
+function hasRealConditions(a) {
+  const text = String(a?.conditions ?? '').trim()
+  return !!text && text !== '无'
 }
 // ===== 2026-11-17：详情页行动卡辅助（呈现层；判定只用现有字段，不新增接口） =====
 // 剩余名额 = 容量 − 正式 − 有效预留（§6.4.1「可用名额扣除有效预留」），不低于 0。
@@ -1984,6 +2094,17 @@ function deadlineHumanPoint(a) {
   const day = deadlineIsToday(a) ? '今天' : (deadlineIsTomorrow(a) ? '明天' : `${m[1]}-${m[2]}-${m[3]}`)
   return `${day}（${WEEK[d.getDay()]}）${periodWord(+m[4])} ${m[4]}:${m[5]}`
 }
+// 批次 C / 任务 15：纯展示的提前量，复用东八区解析，不改变截止/报名判定。
+function deadlineGapText(a) {
+  if (!a || !a.deadline || !a.start_time) return ''
+  const gap = parseShanghai(a.start_time) - parseShanghai(a.deadline)
+  if (!(gap > 0) || gap >= 24 * 3600000) return ''
+  const mins = Math.floor(gap / 60000)
+  if (mins < 1) return '比开始早不到 1 分钟'
+  if (mins < 60) return `比开始早 ${mins} 分钟`
+  const h = Math.floor(mins / 60), r = mins % 60
+  return r ? `比开始早 ${h} 小时 ${r} 分钟` : `比开始早 ${h} 小时`
+}
 // 任务 10：截止角标口径收敛——今天→今天截止、明天→明天截止、其余→即将截止。
 function deadlineBadgeText(a) {
   if (deadlineIsToday(a)) return '今天截止'
@@ -2099,6 +2220,11 @@ const filteredHall = computed(() => {
   if (onlyHasSeats.value) list = list.filter(hasOpenSeat)
   return list
 })
+// 任务 4（2026-11-21）：默认大厅把已结束活动收进一行原生 details 折叠；
+// 任一筛选/搜索生效时保持原行为（已结束项按原规则参与筛选，不折叠）。
+const hallHasFilters = computed(() => !!q.value.trim() || !!campus.value || !!timeSlot.value || !!category.value || onlyHasSeats.value)
+const hallActiveCards = computed(() => hallHasFilters.value ? filteredHall.value : filteredHall.value.filter(a => !activityEnded(a)))
+const hallEndedCards = computed(() => hallHasFilters.value ? [] : filteredHall.value.filter(activityEnded))
 // 任务 10：有搜索词且当前 0 结果（不含加载中/加载失败/补拉中）时，隐藏大厅横幅与空态封面。
 const searchNoResult = computed(() => !!q.value.trim() && !hallSearchIncomplete.value && !loadError.value && !filteredHall.value.length)
 // 任务 11：搜索 0 结果时，从可报名活动（OPEN、未取消、未过截止）里挑最接近的一个；
@@ -2481,30 +2607,46 @@ function validateRegField(name) {
   }
   return true
 }
-function validateRegAll() {
-  const aOk = validateRegField('account')
-  const nOk = validateRegField('nickname')
-  if (!aOk) return 'account'
-  if (!nOk) return 'nickname'
-  return null
-}
 function onRegBlur(name) { validateRegField(name) }
 function onRegInput(name) {
   // v-model 的赋值与这里的事件监听在同一次事件中执行，延后一拍复检，确保读到最新值。
+  if (regFormError.value) regFormError.value = ''
   if (name === 'account' && regErrors.value.account) nextTick(() => validateRegField('account'))
   if (name === 'nickname' && regErrors.value.nickname) nextTick(() => validateRegField('nickname'))
 }
 function onConfirmInput() {
   // 同 onRegInput：延后一拍读最新值；仅当已报错且两次已一致时清错。
+  if (regFormError.value) regFormError.value = ''
+  if (regPwdError.value && password.value) regPwdError.value = ''
   if (regConfirmError.value && passwordConfirm.value === password.value) nextTick(() => { if (passwordConfirm.value === password.value) regConfirmError.value = '' })
 }
 function submitRegister() {
-  const first = validateRegAll()
-  if (first) { focusAuthField(first === 'account' ? 'reg-account' : 'reg-nickname'); return }
-  if (!passwordConfirm.value) { regConfirmError.value = '请再次输入密码'; focusAuthField('reg-password-confirm'); return }
-  if (passwordConfirm.value !== password.value) { regConfirmError.value = '两次输入的密码不一致，请重新输入'; focusAuthField('reg-password-confirm'); return }
-  regConfirmError.value = ''
+  // 任务 1（2026-11-21）：按页面字段顺序逐项校验，汇总成页顶横幅；首个错误字段获得焦点。
+  regErrors.value = { account: '', nickname: '' }
+  regPwdError.value = ''
   regPwdServerError.value = ''
+  regConfirmError.value = ''
+  regFormError.value = ''
+  const issues = []
+  const acc = account.value
+  if (!acc) { regErrors.value.account = '请输入账号'; issues.push({ field: 'reg-account', text: '请填写账号' }) }
+  else if (acc.length < 4) { regErrors.value.account = '账号至少 4 个字符'; issues.push({ field: 'reg-account', text: '账号至少 4 个字符' }) }
+  else if (acc.length > 32) { regErrors.value.account = '账号最多 32 个字符'; issues.push({ field: 'reg-account', text: '账号最多 32 个字符' }) }
+  if (!password.value) { regPwdError.value = '请输入密码'; issues.push({ field: 'reg-password', text: '请填写密码' }) }
+  if (!passwordConfirm.value) { regConfirmError.value = '请再次输入密码'; issues.push({ field: 'reg-password-confirm', text: '请再次输入密码' }) }
+  else if (passwordConfirm.value !== password.value) { regConfirmError.value = '两次输入的密码不一致，请重新输入'; issues.push({ field: 'reg-password-confirm', text: '两次输入的密码不一致，请重新输入' }) }
+  if (nickname.value && [...nickname.value].length > 30) { regErrors.value.nickname = '昵称最多 30 字'; issues.push({ field: 'reg-nickname', text: '昵称最多 30 字' }) }
+  if (issues.length) {
+    regFormError.value = '注册未完成：' + issues.map(x => x.text).join('；')
+    focusAuthField(issues[0].field)
+    // 任务 1：聚焦错误字段后仍把页顶横幅滚到可视区（避开吸顶栏），
+    // 避免 150% 缩放下横幅被顶栏遮住；焦点仍留在首个错误字段。
+    nextTick(() => {
+      const banner = document.querySelector('.reg-form-error')
+      if (banner && banner.scrollIntoView) banner.scrollIntoView({ block: 'start' })
+    })
+    return
+  }
   register()
 }
 function mapRegServerError(e) {
@@ -2536,6 +2678,9 @@ function goAuth(target) {
   regErrors.value = { account: '', nickname: '' }
   loginErrors.value = { account: '', password: '' }
   regPwdServerError.value = ''
+  regPwdError.value = ''
+  regConfirmError.value = ''
+  regFormError.value = ''
   loginHint.value = false
   if (authModal.value.visible) closeAuthModal()
   if (target === 'register') {
@@ -2553,7 +2698,7 @@ function isAuthViewNow() { return !user.value && view.value !== 'recovery' }
 function showAuthModal(title, text, focusAfter = null) {
   if (!text) return
   authModalTrigger = (document.activeElement instanceof HTMLElement) ? document.activeElement : null
-  authModal.value = { visible: true, title: title || '提示', text: String(text), focusAfter, confirmLabel: '', cancelLabel: '', onConfirm: null, onClose: null }
+  authModal.value = { visible: true, title: title || '提示', text: String(text), focusAfter, confirmLabel: '', cancelLabel: '', onConfirm: null, onClose: null, confirmed: false }
   document.body.style.overflow = 'hidden'
   nextTick(() => { if (authModalBtn.value) authModalBtn.value.focus() })
 }
@@ -2563,7 +2708,7 @@ function showAuthModal(title, text, focusAfter = null) {
 function showConfirmModal(title, text, { confirmLabel = '确认', cancelLabel = '取消', onConfirm = null, onClose = null, input = null, returnFocus = null } = {}) {
   if (!text) return
   authModalTrigger = returnFocus instanceof HTMLElement ? returnFocus : (document.activeElement instanceof HTMLElement ? document.activeElement : null)
-  authModal.value = { visible: true, title: title || '请确认', text: String(text), focusAfter: null, confirmLabel, cancelLabel, onConfirm, onClose, input }
+  authModal.value = { visible: true, title: title || '请确认', text: String(text), focusAfter: null, confirmLabel, cancelLabel, onConfirm, onClose, input, confirmed: false }
   document.body.style.overflow = 'hidden'
   nextTick(() => { if (authModalCancelBtn.value) authModalCancelBtn.value.focus() })
 }
@@ -2576,10 +2721,13 @@ const authModalInputError = computed(() => {
   return ''
 })
 // 点确认先校验并关框再执行回调；关闭（含 Esc / 遮罩）不触发 onConfirm。
+// 任务 5（2026-11-21）：关闭前标记 confirmed，onClose 因而能区分「确认关闭」与取消；
+// 既有 onClose 调用点忽略该参数，行为不变。
 function confirmAuthModal() {
   if (!authModal.value.visible || authModalInputError.value) return
   const fn = authModal.value.onConfirm
   const inputValue = authModal.value.input ? authModal.value.input.value : undefined
+  authModal.value.confirmed = true
   closeAuthModal()
   if (typeof fn === 'function') fn(inputValue)
 }
@@ -2587,13 +2735,14 @@ function closeAuthModal() {
   if (!authModal.value.visible) return
   const f = authModal.value.focusAfter
   const onClose = authModal.value.onClose
+  const confirmed = !!authModal.value.confirmed
   const trigger = authModalTrigger
   authModalTrigger = null
-  authModal.value = { visible: false, title: '提示', text: '', focusAfter: null, confirmLabel: '', cancelLabel: '', onConfirm: null, onClose: null }
+  authModal.value = { visible: false, title: '提示', text: '', focusAfter: null, confirmLabel: '', cancelLabel: '', onConfirm: null, onClose: null, confirmed: false }
   if (!menuOpen.value) document.body.style.overflow = ''
   if (f) nextTick(() => focusAuthField(f))
   else if (trigger && document.contains(trigger)) nextTick(() => trigger.focus())
-  if (typeof onClose === 'function') onClose()
+  if (typeof onClose === 'function') onClose(confirmed)
 }
 // ===== 2026-11-17：移动端覆盖式侧边抽屉（仅 ≤640px；桌面顶栏行为不变） =====
 function isMobileDrawer() { return typeof window !== 'undefined' && window.innerWidth <= 640 }
@@ -2680,9 +2829,12 @@ async function login() {
     loadHall(); loadNotif()
     if (view.value === 'my') { loadMy(); loadOrganized(); loadCredit(); loadMyGovernance() }
   } catch (e) {
-    // 2026-11-17：登录失败提示改走居中浮层（不再飘在页顶）。
-    showAuthModal('登录失败', friendlyErr(e), 'login-submit')
+    // 批次 C / 任务 17：仅登录失败改非锁屏横幅，沿用 5 秒自动消失和 × 关闭。
+    // 注册失败/登录已失效等其他 showAuthModal 调用不变。
+    showMsg('登录失败：' + friendlyErr(e))
     loginHint.value = true
+    await nextTick()
+    window.scrollTo(0, 0)
   } finally { loginBusy.value = false }
 }
 async function quick(a) {
@@ -2873,6 +3025,7 @@ async function userMenuRun(fn) {
   try { await fn() } finally { userMenuOpen.value = false }
 }
 function logout() {
+  if (isAuthSuccessMsg(msg.value)) msg.value = ''
   token.value = ''; localStorage.removeItem('token'); user.value = null; clearAccountState(); view.value = 'hall'
   // 任务 9：退出时清空密码框。
   password.value = ''
@@ -2976,10 +3129,12 @@ async function saveEditCover(id) {
     editCoverBusy.value = false
   }
 }
-// Canvas 名额环：正式/容量画成圆环，中心写数字；深色模式换配色。
-// 画布属性 112（CSS 56，2x 清晰度），按 data-formal / data-cap 画。
-// 2026-11-17：详情页大环（144，CSS 72）带 data-remaining 时，环心改写剩余名额；
+// Canvas 名额环：正式/容量画成圆环，环心数字改由同尺寸 DOM 文本呈现。
+// 画布属性 112（CSS 3.5rem，2x 清晰度），按 data-formal / data-cap 画。
+// 2026-11-17：详情页大环（144，CSS 4.5rem）带 data-remaining 时，环心改写剩余名额；
 // 大厅环不带该属性，仍写「正式/容量」，两处环弧口径一致。
+// 任务 12（2026-11-21）：实测文字-only 缩放时 canvas 固定 px 数字不变，故数字移出画布，
+// 由 .cap-ring-number（rem）叠加；画布不再 fillText，避免重影，role=img/aria-label 移到包裹层。
 function drawCapRings() {
   const dark = darkMode.value
   document.querySelectorAll('canvas.cap-ring').forEach(cv => {
@@ -2998,17 +3153,6 @@ function drawCapRings() {
       ctx.strokeStyle = '#D97757'
       ctx.lineCap = 'round'
       ctx.beginPath(); ctx.arc(cx, cy, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac); ctx.stroke()
-    }
-    ctx.fillStyle = dark ? '#f0efec' : '#141413'
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'
-    const remAttr = cv.dataset.remaining
-    if (remAttr !== undefined) {
-      // 详情页 144 画布：字号同比放大到 33px，环心只写剩余名额。
-      ctx.font = '700 33px system-ui, sans-serif'
-      ctx.fillText(String(Number(remAttr) || 0), cx, cy + 1)
-    } else {
-      ctx.font = (formal === 0 ? '700' : '600') + ' 26px system-ui, sans-serif'
-      ctx.fillText(formal + '/' + cap, cx, cy + 1)
     }
   })
 }
@@ -3345,10 +3489,14 @@ function confirmSignupConditions(a, send, returnFocus = document.activeElement) 
   if (acknowledgedConditions.get(String(id)) === conditions) { submit(true); return }
   const openConfirm = () => {
     if (!currentMembershipContext(c)) { signupPending.value = false; return }
-    showConfirmModal('最后确认一下就能报上', '参与条件：' + conditions + '\n点继续报名即表示已阅读并同意以上条件。', {
-      returnFocus, confirmLabel: '我已阅读，继续报名', onConfirm: () => submit(true),
-      onClose: () => { if (c.token === token.value) signupPending.value = false },
-    })
+    // 任务 9（2026-11-21）：候补只是排队，标题与按钮不说「报上/报名」；正式报名口径不变。
+    const queue = joinsQueue(a)
+    showConfirmModal(queue ? '最后确认一下就能加入候补队列' : '最后确认一下就能报上',
+      '参与条件：' + conditions + '\n点继续' + (queue ? '排队' : '报名') + '即表示已阅读并同意以上条件。', {
+        returnFocus, confirmLabel: queue ? '我已阅读，继续排队' : '我已阅读，继续报名',
+        onConfirm: () => submit(true),
+        onClose: () => { if (c.token === token.value) signupPending.value = false },
+      })
   }
   if (typeof requestAnimationFrame === 'function') requestAnimationFrame(openConfirm)
   else openConfirm()
@@ -4080,7 +4228,7 @@ async function loadNotif() {
   try {
     const p = pageQuery()
     const j = await api('/notifications?' + p.toString())
-    notifs.value = pagedItems(j)
+    notifs.value = pagedItems(j).map(normalizeNotif)
     notifTotal.value = (j && typeof j.total === 'number') ? j.total : notifs.value.length
     notifPage.value = pageOf(j, 1)
     const u = j && (j.unread ?? j.unread_count)
@@ -4096,7 +4244,7 @@ async function loadMoreNotif() {
   try {
     const next = notifPage.value + 1
     const j = await api('/notifications?' + pageQuery(next).toString())
-    const items = pagedItems(j)
+    const items = pagedItems(j).map(normalizeNotif)
     const seen = new Set(notifs.value.map(n => n.id))
     notifs.value = notifs.value.concat(items.filter(n => !seen.has(n.id)))
     notifPage.value = next
@@ -4221,6 +4369,18 @@ async function focusPublishError() {
   await nextTick()
   document.querySelector('.publish-form [aria-invalid="true"]')?.focus()
 }
+// 任务 5（2026-11-21）：同名重发（以及同一处的标题星期提醒）改用站内确认框。
+// onClose 在确认关闭时收到 true，取消/Esc/遮罩收到 false；Promise 只结算一次。
+function askPublishWarnings(text, duplicate) {
+  return new Promise(resolve => {
+    showConfirmModal('发布确认', text, {
+      confirmLabel: duplicate ? '确认再发一个' : '继续发布',
+      cancelLabel: '取消',
+      onConfirm: () => resolve(true),
+      onClose: (confirmed) => resolve(confirmed === true),
+    })
+  })
+}
 async function publish() {
   if (publishBusy.value || view.value !== 'publish') return
   const c = membershipContext(null)
@@ -4271,10 +4431,12 @@ async function publish() {
     }
     // 任务 22：标题星期与开始星期不符，非阻塞确认（点取消可回去改）。
     // 任务 23：同名标题非阻塞提醒（不拦截入库，点取消可回去改）。
+    // 任务 5（2026-11-21）：同一处 warns 改走站内确认框，不再调用原生 confirm。
     const warns = []
     if (titleWeekdayHint.value) warns.push(titleWeekdayHint.value)
-    if (form.value.title.trim() && hall.value.some(a => a.title === form.value.title.trim())) warns.push(`已有同名活动「${form.value.title.trim()}」，确认要再发一个吗？第二场请在标题注明场次`)
-    if (warns.length && !confirm(warns.join('\n'))) return
+    const duplicateTitle = !!(form.value.title.trim() && hall.value.some(a => a.title === form.value.title.trim()))
+    if (duplicateTitle) warns.push(`已有同名活动「${form.value.title.trim()}」，确认要再发一个吗？第二场请在标题注明场次`)
+    if (warns.length && !(await askPublishWarnings(warns.join('\n'), duplicateTitle))) return
     // 2026-11-17：封面只在明确选了图库/上传时带 cover_url；默认轮换不带该键。
     const j = await api('/activities', 'POST', {
       ...form.value, deadline, start_time: start, end_time: end,
@@ -4436,10 +4598,13 @@ watch(menuOpen, (open) => {
   }
 })
 // 2026-11-17：登录/注册页原本走顶部提示条的结果型反馈，统一改走居中浮层。
-// 登录/注册成功横幅出现时 user 已落盘，watcher 提前返回，不会在切页瞬间闪浮层。
+// 成功消息仅走横幅，不能因退出时 user 变空而被转为过期浮层。
 watch([msg, view, user], () => {
   if (!msg.value) return
+  if (isAuthSuccessMsg(msg.value)) return
   if (!isAuthViewNow()) return
+  // 批次 C / 任务 17：继续放行登录失败横幅，其余认证结果仍走原浮层。
+  if (view.value !== 'register' && loginHint.value && msg.value.startsWith('登录失败：')) return
   if (authModal.value.visible) return
   const text = msg.value
   const title = view.value === 'register'
