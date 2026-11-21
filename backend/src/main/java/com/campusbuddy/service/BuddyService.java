@@ -1,12 +1,16 @@
 package com.campusbuddy.service;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.math.BigDecimal;
 import java.sql.PreparedStatement;
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
@@ -31,6 +35,8 @@ public class BuddyService {
     /** 启动时从 DataSource 取数据库产品名判断一次并缓存：MySQL 用 INSERT IGNORE，
      *  PostgreSQL 保持 ON CONFLICT DO NOTHING。两分支语义相同：event_key 冲突时静默跳过。 */
     private final boolean mysql;
+    /** E2-9：批处理失败留痕；只记录任务名与异常类，不带 SQL、绑定值或用户信息。 */
+    private static final Logger log = LoggerFactory.getLogger(BuddyService.class);
 
     public BuddyService(JdbcTemplate jdbc, @Value("${app.invite-ttl-seconds:120}") int inviteTtlSeconds,
                         @Value("${app.invite-day-start-hour:8}") int dayStartHour,
@@ -123,6 +129,88 @@ public class BuddyService {
         throw new IllegalStateException("无法识别的时间类型: " + v);
     }
 
+    /** 业务时间：锁内重新取服务器时间，纳秒截到秒。
+     *  截秒是为了版本令牌双库一致——MySQL DATETIME(0) 只存到秒，若 Java 侧写纳秒，
+     *  响应里返回的令牌与下一次从库里读出的 updated_at 会不相等。 */
+    private static LocalDateTime nowSeconds() {
+        return LocalDateTime.now().withNano(0);
+    }
+
+    /** 版本令牌：行的 updated_at 渲染值，统一用 LocalDateTime.toString()（ISO-8601 墙钟），
+     *  与详情响应里 my_queued_at / invitation_expires_at 的既有渲染口径一致。
+     *  A/B 两路及前端均按此字符串原样回传比较，不另做时区或格式转换。 */
+    private static String versionOf(Object updatedAt) {
+        return asLocalDateTime(updatedAt).toString();
+    }
+
+    /** 乐观并发校验：expected 为空表示不校验（旧客户端兼容）；不符返回 409（ConflictException）。 */
+    private void requireVersion(String expected, Object actualUpdatedAt, String message) {
+        if (expected == null || expected.isBlank()) return;
+        String actual = versionOf(actualUpdatedAt);
+        if (!expected.equals(actual))
+            throw new ConflictException(message, Map.of("current_version", actual));
+    }
+
+    /** R2 候补名次：有效 WAITING 队列按 (queued_at, id) 升序，1 起算；不在队列中返回 null。 */
+    private Integer waitingRank(long activityId, Object participationId) {
+        var queue = jdbc.queryForList(
+                "SELECT id FROM participation WHERE activity_id=? AND status='WAITING' " +
+                        "ORDER BY queued_at, id", activityId);
+        for (int i = 0; i < queue.size(); i++) {
+            if (Objects.equals(((Number) queue.get(i).get("id")).longValue(),
+                    ((Number) participationId).longValue())) return i + 1;
+        }
+        return null;
+    }
+
+    /** B7：候补通知里的确认窗口文案按实际配置生成（不再写死“2 分钟”）。
+     *  ≥60 秒显示分钟（整分钟不带小数，否则保留 1 位），否则显示秒。 */
+    private String inviteWindowText() {
+        int s = inviteTtlSeconds;
+        if (s >= 60) {
+            if (s % 60 == 0) return (s / 60) + " 分钟";
+            return String.format(Locale.ROOT, "%.1f 分钟", s / 60.0);
+        }
+        return s + " 秒";
+    }
+
+    /** B2：容量严格整数解析：接受整数型 Number / 整数值的 BigDecimal / 纯数字字符串；
+     *  小数与 int 溢出返回 null（由调用方按字段错误拒绝），不做截断。 */
+    private static Integer parseStrictInt(Object raw) {
+        if (raw == null) return null;
+        if (raw instanceof Integer i) return i;
+        if (raw instanceof Short s) return (int) s;
+        if (raw instanceof Byte b) return (int) b;
+        if (raw instanceof Long l)
+            return (l >= Integer.MIN_VALUE && l <= Integer.MAX_VALUE) ? l.intValue() : null;
+        if (raw instanceof BigDecimal bd) {
+            try { return bd.stripTrailingZeros().scale() <= 0 ? bd.intValueExact() : null; }
+            catch (ArithmeticException e) { return null; }
+        }
+        if (raw instanceof Number n) {
+            double d = n.doubleValue();
+            if (!Double.isFinite(d) || d != Math.rint(d) || d < Integer.MIN_VALUE || d > Integer.MAX_VALUE)
+                return null;
+            return (int) d;
+        }
+        if (raw instanceof String str) {
+            String t = str.trim();
+            if (!t.matches("[+-]?\\d+")) return null;
+            try { return Integer.parseInt(t); } catch (NumberFormatException e) { return null; }
+        }
+        return null;
+    }
+
+    /** B2：时间字段解析（String ISO / 已是 LocalDateTime / Timestamp）；无法解析返回 null。 */
+    private static LocalDateTime parseTimeValue(Object raw) {
+        if (raw instanceof LocalDateTime ldt) return ldt;
+        if (raw instanceof Timestamp t) return t.toLocalDateTime();
+        if (raw instanceof String s) {
+            try { return LocalDateTime.parse(s.trim()); } catch (Exception e) { return null; }
+        }
+        return null;
+    }
+
     private void notify(Long userId, Long activityId, Long invitationId,
                         String type, String content, String eventKey) {
         notifyWithSender(userId, activityId, invitationId, type, content, eventKey, null);
@@ -151,6 +239,23 @@ public class BuddyService {
         jdbc.update("INSERT INTO participation_events(participation_id, activity_id, user_id, " +
                         "event_type, from_status, to_status, detail, created_at) VALUES (?,?,?,?,?,?,?,?)",
                 pid, aid, uid, type, from, to, detail, ts(LocalDateTime.now()));
+    }
+
+    /** DG-BE-06：活动字段级变更日志（activity_change_log，一行一字段）。old/new 统一字符串化，时间用既有全格式。 */
+    private void logActivityChange(long activityId, long actorId, String changeType, String field,
+                                   Object oldValue, Object newValue, String reason) {
+        jdbc.update("INSERT INTO activity_change_log(activity_id, actor_id, change_type, field, " +
+                        "old_value, new_value, reason, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                activityId, actorId, changeType, field,
+                oldValue == null ? null : String.valueOf(oldValue),
+                newValue == null ? null : String.valueOf(newValue),
+                reason, ts(LocalDateTime.now()));
+    }
+    /** 字段未变时不写日志行。 */
+    private void logFieldChange(long activityId, long actorId, String changeType, String field,
+                                Object oldValue, Object newValue, String reason) {
+        if (!Objects.equals(oldValue, newValue))
+            logActivityChange(activityId, actorId, changeType, field, oldValue, newValue, reason);
     }
 
     /** 组织者通知（任务 2，2026-11-07）：报名 / 进候补 / 退出 / 递补确认时通知组织者。
@@ -205,9 +310,14 @@ public class BuddyService {
             int vacancy = ((Number) act.get("capacity")).intValue()
                     - formalCount(activityId) - reservedCount(activityId, now);
             if (vacancy <= 0) return;
+            // E2-11：按 R2 顺序跳过当前停用或封禁中的账号，保持其 WAITING、不消耗名次，
+            // 待账号恢复后由下一轮补发；账号口径与 AuthService.login 一致。
             var waiting = jdbc.queryForList(
-                    "SELECT id, user_id FROM participation WHERE activity_id=? AND status='WAITING' " +
-                    "ORDER BY queued_at, id LIMIT 1", activityId);
+                    "SELECT p.id, p.user_id FROM participation p JOIN app_user u ON u.id=p.user_id " +
+                            "WHERE p.activity_id=? AND p.status='WAITING' AND u.status='ACTIVE' " +
+                            "AND NOT EXISTS (SELECT 1 FROM user_ban b " +
+                            "WHERE b.user_id=p.user_id AND b.lifted_at IS NULL) " +
+                            "ORDER BY p.queued_at, p.id LIMIT 1", activityId);
             if (waiting.isEmpty()) return;
             long partId = ((Number) waiting.get(0).get("id")).longValue();
             long userId = ((Number) waiting.get(0).get("user_id")).longValue();
@@ -241,7 +351,7 @@ public class BuddyService {
     /** 任务 8：白天补发夜间暂缓的递补邀请。由 SweepService 每轮调用；夜间直接返回。
      *  只扫有候补的 OPEN 活动，实际发邀请仍走 promote()（容量 / 截止 / 白天三重门都在里面），
      *  所以不会多发、不会在截止后发。 */
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public void backfillDaytimeInvites(LocalDateTime now) {
         if (!isDaytime(now)) return;
         var ids = jdbc.queryForList(
@@ -249,7 +359,16 @@ public class BuddyService {
                 "WHERE a.status='OPEN' AND a.deadline > ? ORDER BY a.id",
                 Long.class, ts(now));
         for (Long id : ids) {
-            try { promote(id, now); } catch (Exception e) { /* 下一轮重试 */ }
+            // E2-9：原空 catch 会吞掉异常并继续使用可能已被 PG 标记失败的事务。
+            // 记录任务名 + 异常类后向上抛出，由 Sweep / Governance 的调用方决定整轮处理。
+            try {
+                // 逐活动在调用前刷新业务时间，避免整批共用扫描时刻、排队等待跨过截止后仍按旧时间发邀请（E2-9 取时口径）。
+                promote(id, nowSeconds());
+            } catch (RuntimeException e) {
+                log.warn("backfillDaytimeInvites promote failed, activityId={}, exception={}",
+                        id, e.getClass().getSimpleName());
+                throw e;
+            }
         }
     }
 
@@ -289,9 +408,35 @@ public class BuddyService {
 
     @Transactional
     public Map<String, Object> signup(long activityId, long userId, boolean confirmConflict) {
-        LocalDateTime now = LocalDateTime.now();
-        // 锁定活动行：同一活动的并发报名在此串行
+        return signup(activityId, userId, confirmConflict, false);
+    }
+
+    /**
+     * G16（2026-11-21）：活动 conditions 非空白时，新报名（无有效参与）必须显式确认已阅读参与条件——
+     * conditionsConfirmed=false/缺省抛 ValidationException 拒绝（字段 conditions_confirmed）；
+     * 已有有效参与（FORMAL/WAITING/INVITED）的幂等早返回不受门禁影响；
+     * 确认时仍写 CONDITIONS_CONFIRMED 留痕（detail 含确认时刻）。
+     */
+    @Transactional
+    public Map<String, Object> signup(long activityId, long userId, boolean confirmConflict,
+                                      boolean conditionsConfirmed) {
+        // P417：先锁活动，再以锁后的服务器时间完成全部边界判断；不能使用锁前读取的 now。
         var act = jdbc.queryForMap("SELECT * FROM activity WHERE id=? FOR UPDATE", activityId);
+        LocalDateTime now = nowSeconds();
+        // P419：清理同一活动已到期的待确认邀请，再计算有效占用与本人申请状态。
+        // 活动行已锁住，清理与后续报名/递补在同一串行边界内；只补发一次，避免每条
+        // 过期邀请都重复计算/锁行。通知与流水沿用 expireOne 的口径。
+        var expired = jdbc.queryForList(
+                "SELECT i.id FROM invitation i JOIN participation p ON p.id=i.participation_id " +
+                        "WHERE p.activity_id=? AND p.status='INVITED' AND i.status='PENDING' " +
+                        "AND i.expires_at <= ? ORDER BY i.expires_at, i.id",
+                activityId, ts(now));
+        for (var row : expired) {
+            expireInvitationLocked(((Number) row.get("id")).longValue(), now, false);
+        }
+        if (!expired.isEmpty()) promote(activityId, now);
+        // 活动锁仍持有；重新读取活动，清理/递补后容量和状态以当前值为准。
+        act = jdbc.queryForMap("SELECT * FROM activity WHERE id=?", activityId);
         if (!"OPEN".equals(act.get("status"))) {
             // 任务 21（2026-11-11）：已取消活动给出明确文案；READY/RUNNING/ENDED 仍用通用提示。
             if ("CANCELLED".equals(act.get("status")))
@@ -300,6 +445,8 @@ public class BuddyService {
         }
         if (!now.isBefore(asLocalDateTime(act.get("deadline"))))
             throw new CodedException("SIGNUP_DEADLINE_PASSED", "已过报名截止时间");
+        // DG-BE-05：被组织者移出且限制未解除者不得重报（复用/新建记录前判定）
+        checkRemovedRestriction(activityId, userId);
         var existing = jdbc.queryForList(
                 "SELECT * FROM participation WHERE activity_id=? AND user_id=?", activityId, userId);
         if (!existing.isEmpty()) {
@@ -310,7 +457,15 @@ public class BuddyService {
             }
             // 退出/过期后重新报名：复用同一条记录，候补时间重置（SRS 3.3.5.2）
         }
+        // G16（2026-11-21）：条件确认服务端强制。上方已有有效参与的早返回不受影响（豁免）；
+        // 无条件活动不拦；确认留痕逻辑（下方 if (conditionsConfirmed)）保持不动。
+        Object conditionsRaw = act.get("conditions");
+        if (conditionsRaw instanceof String condText && !condText.isBlank() && !conditionsConfirmed)
+            throw new ValidationException("conditions_confirmed", "请先确认已阅读参与条件");
         int capacity = ((Number) act.get("capacity")).intValue();
+        // E2-4 复核结论：已有候补队列时，新报名一律排队，不因瞬时空位越队。
+        // 空位由 promote 按 R2 顺序发邀请消化：队首账号停用时跳过，夜间暂缓发邀。
+        // 候补名次以 waitingRank 按 (queued_at, id) 实时计算的结果为准。
         boolean hasQueue = waitingCount(activityId) > 0;
         int occupied = formalCount(activityId) + reservedCount(activityId, now);
         String status = (!hasQueue && occupied < capacity) ? "FORMAL" : "WAITING";
@@ -339,6 +494,10 @@ public class BuddyService {
                 status.equals("FORMAL") ? "SIGNUP_FORMAL" : "SIGNUP_WAITING",
                 existing.isEmpty() ? null : (String) existing.get(0).get("status"),
                 status, null);
+        if (conditionsConfirmed) {
+            logEvent(pid, activityId, userId, "CONDITIONS_CONFIRMED",
+                    null, status, "conditions_confirmed=true; confirmed_at=" + now);
+        }
         String title = (String) act.get("title");
         long organizerId = ((Number) act.get("organizer_id")).longValue();
         String whenWhere = activityWhenWhere(act);
@@ -354,11 +513,11 @@ public class BuddyService {
                     "「" + nickname(userId) + "」已报名活动「" + title + "」，" + whenWhere + "。",
                     "notify:org:formal:" + activityId + ":" + userId + ":" + now);
         } else {
-            // 任务 10（2026-11-11）：新 WAITING 记录 queued_at 最新，排在队尾，
-            // 其排名即当前候补总人数（与 detail() my_rank 的 queued_at, id 排序口径一致）。
-            int rank = waitingCount(activityId);
+            // 按 R2 (queued_at, id) 计算真实排名：并发报名或重入队可能让本人不是最后一名。
+            Integer rankValue = waitingRank(activityId, pid);
+            int rank = rankValue == null ? waitingCount(activityId) : rankValue;
             notify(userId, activityId, null, "候补",
-                    "活动「" + title + "」已满员，你已进入候补队列，第 " + rank + " 名，" + whenWhere + "。收到递补邀请后请在 2 分钟内确认，超时顺延给下一位。",
+                    "活动「" + title + "」已满员，你已进入候补队列，第 " + rank + " 名，" + whenWhere + "。收到递补邀请后须在 " + inviteWindowText() + " 内确认，超时顺延给下一位。",
                     "notify:waiting:" + activityId + ":" + userId + ":" + now);
             notifyOrganizer(organizerId, userId, activityId, "候补",
                     "「" + nickname(userId) + "」已进入活动「" + title + "」的候补队列，" + whenWhere + "。",
@@ -373,21 +532,34 @@ public class BuddyService {
 
     /** 阶段一 A7：withdraw 仅正式成员可调；候补 / 待确认者走 abandon。
      *  其余状态流转、通知矩阵与文案保持原口径。 */
-    @Transactional
     public Map<String, Object> withdraw(long participationId, long userId) {
-        LocalDateTime now = LocalDateTime.now();
+        return withdraw(participationId, userId, null, null);
+    }
+
+    @Transactional
+    public Map<String, Object> withdraw(long participationId, long userId, Boolean confirmed, String version) {
+        // 统一锁序：先无锁定位 activity_id，再锁活动、再锁参与记录；锁后再取 now。
+        var before = jdbc.queryForMap("SELECT activity_id FROM participation WHERE id=?", participationId);
+        long activityId = ((Number) before.get("activity_id")).longValue();
+        jdbc.queryForMap("SELECT * FROM activity WHERE id=? FOR UPDATE", activityId);
         var part = jdbc.queryForMap(
                 "SELECT * FROM participation WHERE id=? FOR UPDATE", participationId);
         if (!Objects.equals(((Number) part.get("user_id")).longValue(), userId))
             throw new IllegalStateException("只能操作自己的参与记录");
+        requireVersion(version, part.get("updated_at"), "记录已变化，请刷新");
         String st = (String) part.get("status");
-        long activityId = ((Number) part.get("activity_id")).longValue();
+        if ("WITHDRAWN".equals(st))
+            return participationResult(participationId, "WITHDRAWN", true, part.get("updated_at"));
+        if (Boolean.FALSE.equals(confirmed)) throw new IllegalStateException("退出活动需二次确认");
         if (st.equals("WAITING") || st.equals("INVITED"))
             throw new IllegalStateException("候补状态请使用「放弃候补」");
         if (!st.equals("FORMAL"))
             throw new IllegalStateException("当前状态不可退出：" + st);
-        // 锁定活动行，保证退出与递补在同一事务内完成，不出现“名额已释放、邀请未发出”的窗口
-        jdbc.queryForMap("SELECT id FROM activity WHERE id=? FOR UPDATE", activityId);
+        // 锁后取业务时间：活动已开始时正式成员不得退出（设计 P428）。
+        LocalDateTime now = nowSeconds();
+        var actRow = jdbc.queryForMap("SELECT start_time FROM activity WHERE id=?", activityId);
+        if (!now.isBefore(asLocalDateTime(actRow.get("start_time"))))
+            throw new IllegalStateException("活动已开始，不能退出");
         jdbc.update("UPDATE participation SET status='WITHDRAWN', updated_at=? WHERE id=?", ts(now), participationId);
         logEvent(participationId, activityId, userId, "WITHDRAW", "FORMAL", "WITHDRAWN", null);
         promote(activityId, now);
@@ -405,28 +577,49 @@ public class BuddyService {
         notifyOrganizer(((Number) actW.get("organizer_id")).longValue(), userId, activityId, "退出",
                 "「" + nickname(userId) + "」已退出活动「" + title + "」，" + activityWhenWhere(actW) + "。",
                 "notify:org:withdraw:" + participationId + ":" + now);
-        return detail(activityId, userId);
+        return participationResult(participationId, "WITHDRAWN", false, ts(now));
     }
 
     /** 阶段一 A7：放弃候补。WAITING → WITHDRAWN（重排候补顺序）；
      *  INVITED → 邀请 REJECTED + WITHDRAWN，并立即顺延下一位。
      *  通知文案按“放弃候补”口径，与正式退出的「已退出活动」区分。 */
-    @Transactional
     public Map<String, Object> abandon(long participationId, long userId) {
-        LocalDateTime now = LocalDateTime.now();
+        return abandon(participationId, userId, null, null);
+    }
+
+    @Transactional
+    public Map<String, Object> abandon(long participationId, long userId, Boolean confirmed, String version) {
+        var before = jdbc.queryForMap("SELECT activity_id FROM participation WHERE id=?", participationId);
+        long activityId = ((Number) before.get("activity_id")).longValue();
+        jdbc.queryForMap("SELECT * FROM activity WHERE id=? FOR UPDATE", activityId);
         var part = jdbc.queryForMap(
                 "SELECT * FROM participation WHERE id=? FOR UPDATE", participationId);
         if (!Objects.equals(((Number) part.get("user_id")).longValue(), userId))
             throw new IllegalStateException("只能操作自己的参与记录");
+        requireVersion(version, part.get("updated_at"), "记录已变化，请刷新");
         String st = (String) part.get("status");
-        long activityId = ((Number) part.get("activity_id")).longValue();
+        if ("WITHDRAWN".equals(st))
+            return participationResult(participationId, "WITHDRAWN", true, part.get("updated_at"));
+        if (Boolean.FALSE.equals(confirmed)) throw new IllegalStateException("放弃候补需二次确认");
         if (!st.equals("WAITING") && !st.equals("INVITED"))
             throw new IllegalStateException("当前状态不可放弃候补：" + st);
-        jdbc.queryForMap("SELECT id FROM activity WHERE id=? FOR UPDATE", activityId);
+        LocalDateTime now = nowSeconds();
         if (st.equals("INVITED")) {
-            // 待确认者放弃 = 拒绝邀请，释放预留并顺延
-            jdbc.update("UPDATE invitation SET status='REJECTED', responded_at=? " +
-                            "WHERE participation_id=? AND status='PENDING'", ts(now), participationId);
+            var invRows = jdbc.queryForList(
+                    "SELECT * FROM invitation WHERE participation_id=? ORDER BY id DESC LIMIT 1 FOR UPDATE", participationId);
+            if (invRows.isEmpty()) throw new IllegalStateException("邀请记录不存在");
+            var inv = invRows.get(0);
+            String invStatus = (String) inv.get("status");
+            if ("PENDING".equals(invStatus) && !asLocalDateTime(inv.get("expires_at")).isAfter(now)) {
+                expireInvitationLocked(((Number) inv.get("id")).longValue(), now, true);
+                return participationResult(participationId, "EXPIRED", false, ts(now));
+            }
+            if ("EXPIRED".equals(invStatus))
+                return participationResult(participationId, "EXPIRED", false, part.get("updated_at"));
+            if (!"PENDING".equals(invStatus)) throw new IllegalStateException("邀请已失效：" + invStatus);
+            // 未过期待确认者放弃 = 拒绝邀请，释放预留并顺延。
+            jdbc.update("UPDATE invitation SET status='REJECTED', responded_at=? WHERE id=? AND status='PENDING'",
+                    ts(now), inv.get("id"));
         }
         jdbc.update("UPDATE participation SET status='WITHDRAWN', updated_at=? WHERE id=?", ts(now), participationId);
         if (st.equals("WAITING")) resequence(activityId);
@@ -441,80 +634,192 @@ public class BuddyService {
                 "「" + nickname(userId) + "」已放弃活动「" + title + "」的候补，" + activityWhenWhere(actW) + "。",
                 "notify:org:abandon:" + participationId + ":" + now);
         if (st.equals("INVITED")) promote(activityId, now);
-        return detail(activityId, userId);
+        return participationResult(participationId, "WITHDRAWN", false, ts(now));
     }
 
-    @Transactional
+    /** B4/B5 共用返回：状态 + 版本令牌（updated_at 渲染值）+ 幂等标志（加法字段）。 */
+    private Map<String, Object> participationResult(long participationId, String status,
+                                                    boolean already, Object updatedAt) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("participation_id", participationId);
+        out.put("status", status);
+        out.put("my_status", status);
+        out.put("participation_version", versionOf(updatedAt));
+        if (already) out.put("already", true);
+        return out;
+    }
+
+    /** B5：事务内的邀请过期收尾（调用方已持有活动行与参与行锁）：
+     *  邀请 EXPIRED、参与 EXPIRED、流水 INVITED→EXPIRED、发过期通知，
+     *  并在 markPromote=true 时立即递补下一位。无条件推进，不再依赖「先改后抛」的那条路径。
+     *  NC-12：系统过期收尾不写 read_at，未读语义只由用户操作产生。 */
+    private boolean expireInvitationLocked(long invitationId, LocalDateTime now, boolean markPromote) {
+        var invRows = jdbc.queryForList("SELECT * FROM invitation WHERE id=? FOR UPDATE", invitationId);
+        if (invRows.isEmpty()) return false;
+        var inv = invRows.get(0);
+        if (!"PENDING".equals(inv.get("status"))) return false;
+        long partId = ((Number) inv.get("participation_id")).longValue();
+        var partRow = jdbc.queryForMap("SELECT activity_id, user_id FROM participation WHERE id=?", partId);
+        long activityId = ((Number) partRow.get("activity_id")).longValue();
+        long userId = ((Number) partRow.get("user_id")).longValue();
+        int changed = jdbc.update(
+                "UPDATE invitation SET status='EXPIRED' WHERE id=? AND status='PENDING' AND expires_at <= ?",
+                invitationId, ts(now));
+        if (changed != 1) return false;
+        jdbc.update("UPDATE participation SET status='EXPIRED', updated_at=? WHERE id=?", ts(now), partId);
+        logEvent(partId, activityId, userId, "INVITE_EXPIRED", "INVITED", "EXPIRED", null);
+        String title = jdbc.queryForObject("SELECT title FROM activity WHERE id=?", String.class, activityId);
+        boolean hasNext = waitingCount(activityId) > 0;
+        notify(userId, activityId, invitationId, "邀请",
+                hasNext ? "活动「" + title + "」的递补邀请已过期，名额已顺延至下一位候补。"
+                        : "活动「" + title + "」的递补邀请已过期，名额已空出，可重新报名。",
+                "notify:expired:" + invitationId);
+        if (markPromote) promote(activityId, now);
+        return true;
+    }
+
+    /** E1：事务内按“邀请失效”收尾（调用方已持参与 / 邀请 / 活动锁）：
+     *  邀请 PENDING→EXPIRED、参与 INVITED→EXPIRED（条件更新，不覆盖新状态）、流水带原因、
+     *  不写原邀请通知的 read_at（NC-12），仍发失效通知；markPromote=true 时立即递补下一位。
+     *  不改 expires_at，也不走“只有真过期才可收尾”的过期 SQL。 */
+    private boolean closeInvitationLocked(long invitationId, LocalDateTime now, boolean markPromote, String reason) {
+        var invRows = jdbc.queryForList("SELECT * FROM invitation WHERE id=? FOR UPDATE", invitationId);
+        if (invRows.isEmpty()) return false;
+        var inv = invRows.get(0);
+        if (!"PENDING".equals(inv.get("status"))) return false;
+        long partId = ((Number) inv.get("participation_id")).longValue();
+        var partRow = jdbc.queryForMap("SELECT activity_id, user_id FROM participation WHERE id=?", partId);
+        long activityId = ((Number) partRow.get("activity_id")).longValue();
+        long userId = ((Number) partRow.get("user_id")).longValue();
+        int changed = jdbc.update(
+                "UPDATE invitation SET status='EXPIRED', responded_at=? WHERE id=? AND status='PENDING'",
+                ts(now), invitationId);
+        if (changed != 1) return false;
+        changed = jdbc.update(
+                "UPDATE participation SET status='EXPIRED', updated_at=? WHERE id=? AND status='INVITED'",
+                ts(now), partId);
+        if (changed != 1) return false;
+        logEvent(partId, activityId, userId, "INVITE_EXPIRED", "INVITED", "EXPIRED", reason);
+        String title = jdbc.queryForObject("SELECT title FROM activity WHERE id=?", String.class, activityId);
+        notify(userId, activityId, invitationId, "邀请",
+                "活动「" + title + "」的递补邀请已失效：" + reason + "。",
+                "notify:invalidated:" + invitationId);
+        if (markPromote) promote(activityId, now);
+        return true;
+    }
+
+    /** E1：respondInvitation 的业务错误结果。在事务内正常返回、随事务提交，
+     *  由控制器在提交后按 _respond_error 标记映射为 400（不要删除该标记）。 */
+    private Map<String, Object> respondError(String message, long activityId,
+                                             long participationId, long invitationId) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("_respond_error", true);
+        out.put("code", "ERROR");
+        out.put("message", message);
+        out.put("activity_id", activityId);
+        out.put("activity_status", jdbc.queryForObject(
+                "SELECT status FROM activity WHERE id=?", String.class, activityId));
+        out.put("participation_id", participationId);
+        out.put("my_status", jdbc.queryForObject(
+                "SELECT status FROM participation WHERE id=?", String.class, participationId));
+        out.put("invitation_id", invitationId);
+        out.put("invitation_status", jdbc.queryForObject(
+                "SELECT status FROM invitation WHERE id=?", String.class, invitationId));
+        return out;
+    }
+
+    @Transactional(isolation = org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
     public Map<String, Object> respondInvitation(long invitationId, long userId,
                                                  boolean accept, boolean confirmConflict) {
-        LocalDateTime now = LocalDateTime.now();
-        // 锁顺序必须全局一致：participation -> invitation -> activity。
-        // 旧代码先锁 invitation 再更新 participation，与 withdraw（先锁 participation
-        // 再更新 invitation）形成锁顺序倒置，并发接受 + 退出时 PostgreSQL 报死锁。
-        // 这里先无锁读出 participation_id，再按 participation -> invitation 的顺序加锁，
-        // 加锁后重新读 invitation，以加锁后的状态为准。
+        // 遵循全局锁序：activity → participation → invitation。
+        // 无锁读取 participation_id 和 activity_id 仅用于定位待加锁的行，
+        // 后续业务判断以锁后读数为准。
         var inv0 = jdbc.queryForMap("SELECT participation_id FROM invitation WHERE id=?", invitationId);
         long partId0 = ((Number) inv0.get("participation_id")).longValue();
+        var part0 = jdbc.queryForMap("SELECT activity_id FROM participation WHERE id=?", partId0);
+        long activityId0 = ((Number) part0.get("activity_id")).longValue();
+        // E1：活动行在锁内取全字段，accept 分支的状态 / 截止 / 容量复核都以锁后读数为准。
+        var act = jdbc.queryForMap("SELECT * FROM activity WHERE id=? FOR UPDATE", activityId0);
         var part = jdbc.queryForMap("SELECT * FROM participation WHERE id=? FOR UPDATE", partId0);
+        var inv = jdbc.queryForMap("SELECT * FROM invitation WHERE id=? FOR UPDATE", invitationId);
         if (!Objects.equals(((Number) part.get("user_id")).longValue(), userId))
             throw new IllegalStateException("只能操作自己的邀请");
-        var inv = jdbc.queryForMap("SELECT * FROM invitation WHERE id=? FOR UPDATE", invitationId);
         long activityId = ((Number) part.get("activity_id")).longValue();
-        jdbc.queryForMap("SELECT id FROM activity WHERE id=? FOR UPDATE", activityId);
-        if (!"PENDING".equals(inv.get("status"))) {
-            // 2026-11-18 批次1 F2：EXPIRED 是“已过期未接受”，不是“已应答”；
-            // 对已过期邀请 accept 必须 4xx 提示过期，不能返回 200 让客户端误以为确认成功
-            // （探针 P7-A4-04 实测 sweep 先置 EXPIRED 后 accept 得到 200/OK）。
-            // ACCEPTED / REJECTED 等已应答终态仍按原幂等口径返回当前结果。
-            if (accept && "EXPIRED".equals(inv.get("status")))
-                throw new IllegalStateException("邀请已过期，无法接受，名额已空出");
-            return Map.of("invitation_status", inv.get("status"), "note", "该邀请已被处理，返回当前结果");
+        // E1（NC-01/NC-02 同根）：三把锁全部取得后再取业务时间；MySQL 默认 RR 下锁前的
+        // 普通读取会固定旧计数快照，显式 READ_COMMITTED 保证复核读到最新已提交状态。
+        LocalDateTime now = nowSeconds();
+        String invStatus = (String) inv.get("status");
+        if (!"PENDING".equals(invStatus)) {
+            // E1（B5 扩展）：终态邀请一律 4xx + 当前真实状态，不再返回 200 旧结果。
+            String prefix = "EXPIRED".equals(invStatus) ? "邀请已过期" : "邀请已不可应答";
+            throw new IllegalStateException(prefix + "，当前状态：" + invStatus);
         }
-        LocalDateTime expires = asLocalDateTime(inv.get("expires_at"));
-        if (!now.isBefore(expires) && !now.isEqual(expires)) {
-            // 确认接口先于扫描任务到达时，也必须按实际过期时刻拒绝（SRS 3.3.6.5）
-            jdbc.update("UPDATE invitation SET status='EXPIRED' WHERE id=?", invitationId);
-            jdbc.update("UPDATE participation SET status='EXPIRED', updated_at=? WHERE id=?",
-                    ts(now), part.get("id"));
-            // 任务 11（2026-11-10）：与 expireOne 同口径，按当时有无下一位候补区分文案。
-            boolean hasNext = waitingCount(activityId) > 0;
-            promote(activityId, now);
-            throw new IllegalStateException(hasNext ? "邀请已过期，已顺延至下一位候补" : "邀请已过期，名额已空出，可重新报名");
+        // E1：旧邀请不得覆盖新周期——只允许该参与记录最新一条邀请被应答。
+        Long latestInvId = jdbc.queryForObject(
+                "SELECT MAX(id) FROM invitation WHERE participation_id=?", Long.class, partId0);
+        if (latestInvId == null || latestInvId.longValue() != invitationId)
+            return respondError("邀请已失效，请刷新后重试", activityId, partId0, invitationId);
+        // E1：先确认参与行仍为 INVITED，再做过期收尾——旧 PENDING 邀请挂在
+        // FORMAL/WITHDRAWN/WAITING 参与行时，不得由过期分支无条件覆盖新状态。
+        String st = (String) part.get("status");
+        if (!"INVITED".equals(st))
+            return respondError("参与状态已变化：" + st, activityId, partId0, invitationId);
+        if (!now.isBefore(asLocalDateTime(inv.get("expires_at")))) {
+            // E1（NC-03/NC-13）：等号即过期。先在同一事务内做真实收尾（邀请/参与 EXPIRED、
+            // 流水、通知、递补），再正常返回错误结果让事务提交；绝不在此抛异常回滚收尾。
+            expireInvitationLocked(invitationId, now, true);
+            return respondError("邀请已过期，无法接受", activityId, partId0, invitationId);
         }
         if (accept) {
+            // E1：活动门禁复核（防御分支；通常过期分支已先命中）。
+            if (!"OPEN".equals(act.get("status"))
+                    || !now.isBefore(asLocalDateTime(act.get("deadline")))) {
+                closeInvitationLocked(invitationId, now, false, "活动已不可报名");
+                return respondError("活动已不可报名，邀请已失效", activityId, partId0, invitationId);
+            }
+            // E1（NC-01）：活动锁内、转 FORMAL 前重核容量——同一名额不得被重复占用。
+            // 本人邀请已确认是当前活动的有效预留，reservedCount 减 1 恰好排除这条将被消费的邀请。
+            int capacity = ((Number) act.get("capacity")).intValue();
+            int occupied = formalCount(activityId) + (reservedCount(activityId, now) - 1);
+            if (occupied >= capacity) {
+                closeInvitationLocked(invitationId, now, false, "名额已被占用");
+                return respondError("名额已满，邀请已失效", activityId, partId0, invitationId);
+            }
             // 阶段一 B-CEM-04：接受递补将转为正式成员，同样检测时间冲突；
             // 冲突时抛 409，邀请保持 PENDING（事务回滚，不落任何变更）。
-            var actC = jdbc.queryForMap(
-                    "SELECT start_time, end_time FROM activity WHERE id=?", activityId);
             checkTimeConflict(userId, activityId,
-                    asLocalDateTime(actC.get("start_time")), asLocalDateTime(actC.get("end_time")),
+                    asLocalDateTime(act.get("start_time")), asLocalDateTime(act.get("end_time")),
                     confirmConflict);
             int changed = jdbc.update(
                     "UPDATE invitation SET status='ACCEPTED', responded_at=? WHERE id=? AND status='PENDING'",
                     ts(now), invitationId);
             if (changed != 1) throw new IllegalStateException("邀请已被另一方处理");
-            jdbc.update("UPDATE participation SET status='FORMAL', joined_at=?, updated_at=? WHERE id=?",
-                    ts(now), ts(now), part.get("id"));
+            int partChanged = jdbc.update(
+                    "UPDATE participation SET status='FORMAL', joined_at=?, updated_at=? WHERE id=? AND status='INVITED'",
+                    ts(now), ts(now), partId0);
+            if (partChanged != 1) throw new IllegalStateException("参与状态已变化");
             logEvent(partId0, activityId, userId, "INVITE_ACCEPTED", "INVITED", "FORMAL", null);
             // 任务 4：接受递补邀请后，原邀请通知标已读（与过期情形 expireOne 一致）。
             jdbc.update("UPDATE notification SET read_at=? WHERE invitation_id=? AND type='邀请' AND read_at IS NULL",
                     ts(now), invitationId);
             // 任务 2：递补确认通知组织者（SDD §6.8 矩阵）。
-            var actA = jdbc.queryForMap(
-                    "SELECT organizer_id, title, location, start_time, end_time FROM activity WHERE id=?", activityId);
-            notifyOrganizer(((Number) actA.get("organizer_id")).longValue(), userId, activityId, "报名",
-                    "「" + nickname(userId) + "」已确认参加活动「" + actA.get("title") + "」，" + activityWhenWhere(actA) + "。",
+            notifyOrganizer(((Number) act.get("organizer_id")).longValue(), userId, activityId, "报名",
+                    "「" + nickname(userId) + "」已确认参加活动「" + act.get("title") + "」，" + activityWhenWhere(act) + "。",
                     "notify:org:accept:" + invitationId);
             // 2026-11-18 批次1 F1：REQUIREMENTS 硬约束 4「递补确认——通知本人和组织者」，
             // 原实现只调用了 notifyOrganizer，本人侧缺一条确认通知（探针 P7-A7-05）。
             notify(userId, activityId, invitationId, "报名",
-                    "你已确认参加活动「" + actA.get("title") + "」，" + activityWhenWhere(actA) + "。",
+                    "你已确认参加活动「" + act.get("title") + "」，" + activityWhenWhere(act) + "。",
                     "notify:accept:" + invitationId);
         } else {
-            jdbc.update("UPDATE invitation SET status='REJECTED', responded_at=? WHERE id=? AND status='PENDING'",
+            int changed = jdbc.update(
+                    "UPDATE invitation SET status='REJECTED', responded_at=? WHERE id=? AND status='PENDING'",
                     ts(now), invitationId);
-            jdbc.update("UPDATE participation SET status='WITHDRAWN', updated_at=? WHERE id=?",
-                    ts(now), part.get("id"));
+            if (changed != 1) throw new IllegalStateException("邀请已被另一方处理");
+            int partChanged = jdbc.update(
+                    "UPDATE participation SET status='WITHDRAWN', updated_at=? WHERE id=? AND status='INVITED'",
+                    ts(now), partId0);
+            if (partChanged != 1) throw new IllegalStateException("参与状态已变化");
             logEvent(partId0, activityId, userId, "INVITE_REJECTED", "INVITED", "WITHDRAWN", null);
             promote(activityId, now);
         }
@@ -524,27 +829,26 @@ public class BuddyService {
     /** 超时顺延：仅成功抢占邀请状态的任务可处理一次（条件更新 + 事务）。 */
     @Transactional
     public boolean expireOne(long invitationId) {
-        LocalDateTime now = LocalDateTime.now();
-        // 与 respondInvitation / withdraw 保持同一锁顺序：先锁 participation，再条件更新 invitation。
-        // 旧代码先更新 invitation 再更新 participation，与 withdraw（先锁 participation）
-        // 在超时与退出并发时同样可能死锁。
+        // E2-8：全局锁序为 activity → participation → invitation（条件更新）；无锁读取仅用于定位。
         var inv0 = jdbc.queryForMap("SELECT participation_id FROM invitation WHERE id=?", invitationId);
         long partId = ((Number) inv0.get("participation_id")).longValue();
+        var part0 = jdbc.queryForMap("SELECT activity_id FROM participation WHERE id=?", partId);
+        long activityId0 = ((Number) part0.get("activity_id")).longValue();
+        jdbc.queryForMap("SELECT * FROM activity WHERE id=? FOR UPDATE", activityId0);
         var part = jdbc.queryForMap("SELECT activity_id, user_id FROM participation WHERE id=? FOR UPDATE", partId);
         long activityId = ((Number) part.get("activity_id")).longValue();
         long userId = ((Number) part.get("user_id")).longValue();
+        LocalDateTime now = nowSeconds();
         int changed = jdbc.update(
                 "UPDATE invitation SET status='EXPIRED' WHERE id=? AND status='PENDING' AND expires_at <= ?",
                 invitationId, ts(now));
         if (changed != 1) return false;
         jdbc.update("UPDATE participation SET status='EXPIRED', updated_at=? WHERE id=?", ts(now), partId);
-        // 事件口径按规格：INVITE_EXPIRED，INVITED→WAITING（参与行的落库状态仍沿用既有 EXPIRED）。
-        logEvent(partId, activityId, userId, "INVITE_EXPIRED", "INVITED", "WAITING", null);
-        // 任务 3-3：邀请过期要让被邀请人知道。原邀请通知标为已读（不再挂「未读」），
-        // 再发一条过期通知。类型用 '邀请'（notification 表 CHECK 允许，不改表）。
+        // E1（B8）：过期流水与参与真实终态一致：INVITED→EXPIRED。
+        logEvent(partId, activityId, userId, "INVITE_EXPIRED", "INVITED", "EXPIRED", null);
+        // 任务 3-3：邀请过期要让被邀请人知道。不再标已读（NC-12：系统收尾不写 read_at），
+        // 只发过期通知。类型用 '邀请'（notification 表 CHECK 允许，不改表）。
         String title = jdbc.queryForObject("SELECT title FROM activity WHERE id=?", String.class, activityId);
-        jdbc.update("UPDATE notification SET read_at=? WHERE invitation_id=? AND type='邀请' AND read_at IS NULL",
-                ts(now), invitationId);
         // 任务 11（2026-11-10）：按当时有无下一位有效候补区分文案——有下一位才写顺延，
         // 无人写「名额已空出，可重新报名」（参与记录已置 EXPIRED，不计入 waitingCount）。
         boolean hasNext = waitingCount(activityId) > 0;
@@ -557,43 +861,261 @@ public class BuddyService {
         return true;
     }
 
-    /** 任务 1（2026-11-09，P0）：组织者取消活动时给全部受影响成员发取消通知。
-     *  SDD §6.8 通知矩阵：取消通知所有受影响成员。收件人 = 取消前状态为
-     *  FORMAL / WAITING / INVITED 的全部参与者（含组织者本人作为参与者时，
-     *  考研党复现用例就是组织者本人既是发布者又是参与者；不含已退出/已过期者）。
-     *  内容写清原定时间（起止 + 星期 + 时段词，与任务 6 同口径）。
-     *  event_key 按 (活动, 用户) 去重；已取消活动二次取消时收件人为空，
-     *  不重发、仍返回 ok（幂等，任务 20 后端口径）。 */
-    @Transactional
+    /** 截止收尾不推进活动生命周期；活动已开始/结束时也可清理错过扫描的队列。
+     *  G06（2026-11-21）：守卫口径仅拒绝 ENDED/CANCELLED，OPEN/READY/RUNNING 均可收尾，
+     *  避免活动在截止后被推进到 RUNNING 时，WAITING/INVITED 队列永远清不掉。 */
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public Map<String, Object> closeOutActivity(long activityId, LocalDateTime scanTime) {
+        var acts = jdbc.queryForList("SELECT status, deadline FROM activity WHERE id=? FOR UPDATE", activityId);
+        // 扫描时间只用于调用方选取候选；以实际取得活动锁后的时间为准。
+        LocalDateTime now = nowSeconds();
+        if (acts.isEmpty() || Set.of("ENDED", "CANCELLED").contains(acts.get(0).get("status"))
+                || now.isBefore(asLocalDateTime(acts.get(0).get("deadline"))))
+            return Map.of("waitingClosed", 0, "invitedClosed", 0);
+
+        var pending = jdbc.queryForList("SELECT id, user_id, status FROM participation " +
+                "WHERE activity_id=? AND status IN ('WAITING','INVITED') ORDER BY id FOR UPDATE", activityId);
+        int waitingClosed = 0;
+        int invitedClosed = 0;
+        for (var part : pending) {
+            long partId = ((Number) part.get("id")).longValue();
+            long userId = ((Number) part.get("user_id")).longValue();
+            String status = (String) part.get("status");
+            boolean invited = "INVITED".equals(status);
+            if (invited) invalidatePendingInvitations(partId, now);
+            if (jdbc.update("UPDATE participation SET status='EXPIRED', updated_at=? WHERE id=? AND status=?",
+                    ts(now), partId, status) != 1)
+                throw new IllegalStateException("参与状态已变化");
+            logEvent(partId, activityId, userId, "SIGNUP_CLOSED", status, "EXPIRED",
+                    invited ? "报名截止，原邀请作废" : "报名截止，未获得名额");
+            if (invited) invitedClosed++;
+            else waitingClosed++;
+        }
+        return Map.of("waitingClosed", waitingClosed, "invitedClosed", invitedClosed);
+    }
+
+    /** 调用方持有活动行及关联参与行锁；终态邀请不覆盖。 */
+    private void invalidatePendingInvitations(long participationId, LocalDateTime now) {
+        jdbc.update("UPDATE invitation SET status='INVALID', responded_at=? " +
+                "WHERE participation_id=? AND status='PENDING'", ts(now), participationId);
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public Map<String, Object> cancelActivity(long activityId, long userId) {
-        LocalDateTime now = LocalDateTime.now();
-        var act = jdbc.queryForMap(
-                "SELECT organizer_id, title, location, start_time, end_time FROM activity WHERE id=?", activityId);
+        return cancelActivity(activityId, userId, null, null);
+    }
+
+    /** 取消前在锁内锁定并保存参与快照；通知和流水与状态改动同一事务。 */
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public Map<String, Object> cancelActivity(long activityId, long userId, String reason, Boolean confirmed) {
+        var act = jdbc.queryForMap("SELECT * FROM activity WHERE id=? FOR UPDATE", activityId);
         if (!Objects.equals(((Number) act.get("organizer_id")).longValue(), userId))
             throw new IllegalStateException("只有组织者可以取消活动");
-        var recipients = jdbc.queryForList(
-                "SELECT id, user_id, status FROM participation " +
-                "WHERE activity_id=? AND status IN ('FORMAL','WAITING','INVITED')",
-                activityId);
-        // 与 respondInvitation / withdraw 保持同一锁顺序：先锁参与记录，再改邀请。
-        jdbc.queryForList("SELECT id FROM participation WHERE activity_id=? " +
-                "AND status IN ('FORMAL','WAITING','INVITED') FOR UPDATE", activityId);
-        jdbc.update("UPDATE activity SET status='CANCELLED', updated_at=? WHERE id=?",
-                ts(now), activityId);
-        jdbc.update("UPDATE invitation SET status='INVALID' WHERE participation_id IN " +
-                "(SELECT id FROM participation WHERE activity_id=?) AND status='PENDING'", activityId);
-        jdbc.update("UPDATE participation SET status='CANCELLED' WHERE activity_id=? AND status IN ('FORMAL','WAITING','INVITED')", activityId);
+        // G04（2026-11-21）：已取消的重复请求先走幂等返回，不受下方二次确认/原因/结束边界新校验影响。
+        if ("CANCELLED".equals(act.get("status")))
+            return Map.of("ok", true, "status", "CANCELLED", "alreadyCancelled", true, "notified", 0);
+        // G04（2026-11-21）：confirmed 必须显式为 true，缺省 null 与 false 均拒绝。
+        if (!Boolean.TRUE.equals(confirmed))
+            throw new ValidationException("confirmed", "取消活动需二次确认");
+        // G04（2026-11-21）：取消原因必填（非空白），落库存 trim 后的原因。
+        if (reason == null || reason.isBlank())
+            throw new ValidationException("reason", "取消原因不能为空");
+        // G04（2026-11-21）：锁后提前取业务时间，结束边界同时按状态与实际结束时刻判定。
+        LocalDateTime now = nowSeconds();
+        if ("ENDED".equals(act.get("status")) || !now.isBefore(asLocalDateTime(act.get("end_time"))))
+            throw new IllegalStateException("活动已结束，不能取消");
+
+        String trimmedReason = reason.strip();
+        String reasonDetail = "取消原因：" + trimmedReason;
+        // participation_events.detail 最多 500 字，须给「取消原因：」留 5 字。
+        if (reasonDetail != null && reasonDetail.codePointCount(0, reasonDetail.length()) > 500)
+            throw new ValidationException("reason", "取消原因不能超过 495 字");
+        // 一并锁定可能关联残留 PENDING 邀请的终态参与，但不改这些参与、不通知它们。
+        var parts = jdbc.queryForList("SELECT id, user_id, status FROM participation " +
+                "WHERE activity_id=? ORDER BY id FOR UPDATE", activityId);
+        var recipients = parts.stream()
+                .filter(p -> Set.of("FORMAL", "WAITING", "INVITED").contains(p.get("status"))).toList();
+        // G04（2026-11-21）：now 已在校验区提前取得，这里直接复用。
+        jdbc.update("UPDATE activity SET status='CANCELLED', updated_at=? WHERE id=?", ts(now), activityId);
+        // G04（2026-11-21）：变更日志与流水一致，落库存 trim 后的原因。
+        logActivityChange(activityId, userId, "CANCEL", "status", act.get("status"), "CANCELLED", trimmedReason);
+        jdbc.update("UPDATE invitation SET status='INVALID', responded_at=? WHERE participation_id IN " +
+                "(SELECT id FROM participation WHERE activity_id=?) AND status='PENDING'", ts(now), activityId);
+        jdbc.update("UPDATE participation SET status='CANCELLED', updated_at=? " +
+                "WHERE activity_id=? AND status IN ('FORMAL','WAITING','INVITED')", ts(now), activityId);
         String range = fmtFullRange(asLocalDateTime(act.get("start_time")), asLocalDateTime(act.get("end_time")));
-        String title = (String) act.get("title");
-        for (var p : recipients) {
-            long pid = ((Number) p.get("id")).longValue();
-            long uid = ((Number) p.get("user_id")).longValue();
-            logEvent(pid, activityId, uid, "ACTIVITY_CANCELLED", (String) p.get("status"), "CANCELLED", null);
+        for (var part : recipients) {
+            long pid = ((Number) part.get("id")).longValue();
+            long uid = ((Number) part.get("user_id")).longValue();
+            String status = (String) part.get("status");
+            logEvent(pid, activityId, uid, "ACTIVITY_CANCELLED", status, "CANCELLED", reasonDetail);
             notify(uid, activityId, null, "取消",
-                    "活动「" + title + "」已取消，原定时间 " + range + "，地点 " + act.get("location") + "。",
+                    "活动「" + act.get("title") + "」已取消，原定时间 " + range + "，地点 " + act.get("location") + "。"
+                            + ("INVITED".equals(status) ? "原邀请作废。" : "")
+                            + (reasonDetail == null ? "" : reasonDetail + "。"),
                     "notify:cancel:" + activityId + ":" + uid);
         }
-        return Map.of("ok", true);
+        return Map.of("ok", true, "status", "CANCELLED", "alreadyCancelled", false, "notified", recipients.size());
+    }
+
+    private static final Set<String> EDIT_FIELDS = Set.of("title", "category", "description", "conditions",
+            "location", "capacity", "deadline", "start_time", "end_time", "startTime", "endTime");
+    private static final Set<String> ACTIVITY_CATEGORIES = Set.of("羽毛球", "桌游", "学习组", "其他");
+    private static final String EFFECTIVE_RESERVATIONS =
+            " FROM invitation i JOIN participation p ON p.id=i.participation_id "
+            + "WHERE p.activity_id=? AND i.status='PENDING' AND i.expires_at > ?";
+
+    /** 仅在报名期内编辑既有字段；保留参与、活动标识和已发出邀请的期限。 */
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public Map<String, Object> editActivity(long organizerId, long activityId,
+                                            Map<String, Object> fields, String expectedVersion) {
+        var act = jdbc.queryForMap("SELECT * FROM activity WHERE id=? FOR UPDATE", activityId);
+        LocalDateTime now = nowSeconds();
+        if (((Number) act.get("organizer_id")).longValue() != organizerId)
+            throw new IllegalStateException("只有组织者可以修改活动");
+        // G03（2026-11-21）：活动编辑链强制要求版本令牌，缺失直接拒绝；withdraw/abandon 的可选版本口径不变。
+        if (expectedVersion == null || expectedVersion.isBlank())
+            throw new ValidationException("expectedVersion", "缺少版本号，请刷新后重试");
+        requireVersion(expectedVersion, act.get("updated_at"), "活动已变化，请刷新");
+        if (!"OPEN".equals(act.get("status"))) throw new IllegalStateException("活动不在报名期，不可修改");
+        LocalDateTime oldDeadline = asLocalDateTime(act.get("deadline"));
+        if (!now.isBefore(oldDeadline)) throw new IllegalStateException("报名已截止，不可修改");
+
+        Map<String, Object> edits = fields == null ? Map.of() : fields;
+        for (String field : edits.keySet()) {
+            if (field == null || !EDIT_FIELDS.contains(field))
+                throw new ValidationException("fields", "包含不可修改的活动字段");
+        }
+        Map<String, String> errors = new LinkedHashMap<>();
+        String title = editText(edits.getOrDefault("title", act.get("title")), "title", "标题", 50, true, errors);
+        String location = editText(edits.getOrDefault("location", act.get("location")), "location", "地点", 100, true, errors);
+        String description = editText(edits.getOrDefault("description", act.get("description")),
+                "description", "介绍", 2000, false, errors);
+        String conditions = editText(edits.getOrDefault("conditions", act.get("conditions")),
+                "conditions", "参与条件", 500, false, errors);
+        Object category = edits.getOrDefault("category", act.get("category"));
+        if (!(category instanceof String s) || !ACTIVITY_CATEGORIES.contains(s))
+            errors.put("category", "类别不合法");
+        int oldCapacity = ((Number) act.get("capacity")).intValue();
+        Integer capacity = parseStrictInt(edits.getOrDefault("capacity", oldCapacity));
+        if (capacity == null || capacity < 1 || capacity > 100)
+            errors.put("capacity", "人数上限需为 1-100 的整数");
+
+        LocalDateTime oldStart = asLocalDateTime(act.get("start_time"));
+        LocalDateTime oldEnd = asLocalDateTime(act.get("end_time"));
+        LocalDateTime deadline = editTime(edits, "deadline", null, oldDeadline, errors);
+        LocalDateTime start = editTime(edits, "start_time", "startTime", oldStart, errors);
+        LocalDateTime end = editTime(edits, "end_time", "endTime", oldEnd, errors);
+        // G02（2026-11-21）：报名截止允许等于开始时刻，与创建校验和 reschedule 的 !deadline.isAfter(start) 口径一致。
+        if (deadline != null && start != null && end != null
+                && !(now.isBefore(deadline) && !deadline.isAfter(start) && start.isBefore(end)))
+            errors.put("start_time", "时间需满足：现在 < 报名截止 ≤ 开始 < 结束");
+        if (!errors.isEmpty()) throw new ValidationException(errors, errors.values().iterator().next());
+
+        var reservation = jdbc.queryForMap("SELECT COUNT(*) AS reserved, MAX(i.expires_at) AS latest_expiry"
+                + EFFECTIVE_RESERVATIONS, activityId, ts(now));
+        Object lastExpiry = reservation.get("latest_expiry");
+        if (lastExpiry != null && deadline.isBefore(asLocalDateTime(lastExpiry)))
+            throw new ValidationException("deadline", "新报名截止早于已有待确认邀请的过期时间，无法修改");
+        if (capacity < formalCount(activityId) + ((Number) reservation.get("reserved")).intValue())
+            throw new ValidationException("capacity", "人数上限不能低于正式人数与有效预留之和");
+
+        List<String> changes = new ArrayList<>();
+        addEditChange(changes, "名称", act.get("title"), title);
+        addEditChange(changes, "类别", act.get("category"), category);
+        addEditChange(changes, "地点", act.get("location"), location);
+        addEditChange(changes, "人数上限", oldCapacity, capacity);
+        addEditChange(changes, "报名截止", formatChangeTime(oldDeadline), formatChangeTime(deadline));
+        addEditChange(changes, "开始时间", formatChangeTime(oldStart), formatChangeTime(start));
+        addEditChange(changes, "结束时间", formatChangeTime(oldEnd), formatChangeTime(end));
+        // 长文本仅提示已变更，避免长介绍/条件使通知超出表约束。
+        if (!Objects.equals(act.get("description"), description)) changes.add("活动介绍已更新");
+        if (!Objects.equals(act.get("conditions"), conditions)) changes.add("参与条件已更新");
+
+        int notifiedCount = 0;
+        Object updatedAt = act.get("updated_at");
+        if (!changes.isEmpty()) {
+            // G03（2026-11-21）：同秒编辑令牌必变——新 updated_at 取 max(now, 当前 updated_at + 1 秒)。
+            LocalDateTime currentUpdated = asLocalDateTime(act.get("updated_at"));
+            LocalDateTime floor = currentUpdated.plusSeconds(1);
+            LocalDateTime newUpdatedAt = now.isAfter(floor) ? now : floor;
+            var recipients = jdbc.queryForList("SELECT user_id FROM participation " +
+                    "WHERE activity_id=? AND status IN ('FORMAL','WAITING','INVITED') ORDER BY id", activityId);
+            jdbc.update("UPDATE activity SET title=?, category=?, description=?, conditions=?, location=?, " +
+                            "capacity=?, deadline=?, start_time=?, end_time=?, updated_at=? WHERE id=?",
+                    title, category, description, conditions, location, capacity, ts(deadline), ts(start), ts(end), ts(newUpdatedAt), activityId);
+            logFieldChange(activityId, organizerId, "EDIT", "title", act.get("title"), title, null);
+            logFieldChange(activityId, organizerId, "EDIT", "category", act.get("category"), category, null);
+            logFieldChange(activityId, organizerId, "EDIT", "location", act.get("location"), location, null);
+            logFieldChange(activityId, organizerId, "EDIT", "capacity", oldCapacity, capacity, null);
+            logFieldChange(activityId, organizerId, "EDIT", "deadline", formatChangeTime(oldDeadline), formatChangeTime(deadline), null);
+            logFieldChange(activityId, organizerId, "EDIT", "start_time", formatChangeTime(oldStart), formatChangeTime(start), null);
+            logFieldChange(activityId, organizerId, "EDIT", "end_time", formatChangeTime(oldEnd), formatChangeTime(end), null);
+            logFieldChange(activityId, organizerId, "EDIT", "description", act.get("description"), description, null);
+            logFieldChange(activityId, organizerId, "EDIT", "conditions", act.get("conditions"), conditions, null);
+            if (capacity > oldCapacity) promote(activityId, now);
+            String content = "活动「" + title + "」资料已变更：" + String.join("；", changes) + "。";
+            // 不以秒精度版本去重不同编辑；同次变更的通知继续使用既有 outbox 去重键。
+            String eventKey = "notify:edit:" + activityId + ":" + UUID.randomUUID();
+            for (var recipient : recipients) {
+                long uid = ((Number) recipient.get("user_id")).longValue();
+                notify(uid, activityId, null, "变更", content, eventKey);
+            }
+            notifiedCount = recipients.size();
+            updatedAt = ts(newUpdatedAt);
+        }
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("id", activityId);
+        result.put("activity_id", activityId);
+        result.put("status", act.get("status"));
+        result.put("title", title);
+        result.put("category", category);
+        result.put("description", description);
+        result.put("conditions", conditions);
+        result.put("location", location);
+        result.put("capacity", capacity);
+        result.put("deadline", deadline.toString());
+        result.put("start_time", start.toString());
+        result.put("end_time", end.toString());
+        result.put("activity_version", versionOf(updatedAt));
+        result.put("notifiedCount", notifiedCount);
+        result.put("changes", changes);
+        result.put("affected_count", notifiedCount);
+        result.put("capacity_increased", capacity > oldCapacity);
+        return result;
+    }
+
+    private static String editText(Object raw, String field, String label, int max, boolean required,
+                                   Map<String, String> errors) {
+        if (raw == null && !required) return "";
+        if (!(raw instanceof String text)) {
+            errors.put(field, required ? label + "需为 1-" + max + " 字" : label + "格式不正确");
+            return null;
+        }
+        if ((required && text.isBlank()) || text.codePointCount(0, text.length()) > max)
+            errors.put(field, required ? label + "需为 1-" + max + " 字" : label + "不能超过 " + max + " 字");
+        return text;
+    }
+
+    private static LocalDateTime editTime(Map<String, Object> edits, String field, String alias,
+                                          LocalDateTime current, Map<String, String> errors) {
+        boolean hasAlias = alias != null && edits.containsKey(alias);
+        if (hasAlias && edits.containsKey(field)) {
+            errors.put(field, "请勿同时提交同一时间字段的两种写法");
+            return null;
+        }
+        LocalDateTime value = parseTimeValue(edits.getOrDefault(hasAlias ? alias : field, current));
+        if (value == null) errors.put(field, "时间格式不正确");
+        return value;
+    }
+
+    private static String formatChangeTime(LocalDateTime time) {
+        return time.getSecond() == 0 && time.getNano() == 0
+                ? fmtFullMinute(time) : time.toString().replace('T', ' ');
+    }
+
+    private static void addEditChange(List<String> changes, String field, Object oldValue, Object newValue) {
+        if (!Objects.equals(oldValue, newValue)) changes.add(field + "由「" + oldValue + "」改为「" + newValue + "」");
     }
 
     /** 任务 2（2026-11-09，P0）：组织者报名截止前改活动时间（开始 / 结束 / 截止）。
@@ -607,8 +1129,8 @@ public class BuddyService {
     @Transactional
     public Map<String, Object> reschedule(long activityId, long organizerId,
                                           LocalDateTime deadline, LocalDateTime start, LocalDateTime end) {
-        LocalDateTime now = LocalDateTime.now();
         var act = jdbc.queryForMap("SELECT * FROM activity WHERE id=? FOR UPDATE", activityId);
+        LocalDateTime now = nowSeconds();
         if (!Objects.equals(((Number) act.get("organizer_id")).longValue(), organizerId))
             throw new IllegalStateException("只有组织者可以修改活动时间");
         if (!"OPEN".equals(act.get("status")))
@@ -624,7 +1146,9 @@ public class BuddyService {
             if (deadline.isBefore(asLocalDateTime(row.get("expires_at"))))
                 throw new IllegalStateException("新报名截止早于已有待确认邀请的过期时间，无法修改");
         }
+        LocalDateTime oldDeadline = asLocalDateTime(act.get("deadline"));
         LocalDateTime oldStart = asLocalDateTime(act.get("start_time"));
+        LocalDateTime oldEnd = asLocalDateTime(act.get("end_time"));
         String oldRange = fmtFullRange(oldStart, asLocalDateTime(act.get("end_time")));
         var recipients = jdbc.queryForList(
                 "SELECT id, user_id, status FROM participation " +
@@ -632,6 +1156,9 @@ public class BuddyService {
                 activityId);
         jdbc.update("UPDATE activity SET deadline=?, start_time=?, end_time=?, updated_at=? WHERE id=?",
                 ts(deadline), ts(start), ts(end), ts(now), activityId);
+        logFieldChange(activityId, organizerId, "RESCHEDULE", "deadline", formatChangeTime(oldDeadline), formatChangeTime(deadline), null);
+        logFieldChange(activityId, organizerId, "RESCHEDULE", "start_time", formatChangeTime(oldStart), formatChangeTime(start), null);
+        logFieldChange(activityId, organizerId, "RESCHEDULE", "end_time", formatChangeTime(oldEnd), formatChangeTime(end), null);
         String newRange = fmtFullRange(start, end);
         String title = (String) act.get("title");
         String eventDetail = "开始时间由 " + fmtFullMinute(oldStart) + " 改为 " + fmtFullMinute(start);
@@ -808,6 +1335,7 @@ public class BuddyService {
             var m = mine.get(0);
             out.put("my_status", m.get("status"));
             out.put("participation_id", m.get("id"));
+            out.put("participation_version", versionOf(m.get("updated_at")));
             // 任务 5（2026-11-12）：joined_at 非空表示曾经成为过正式成员（候补 / 待确认者
             // 从未被写入 joined_at），供前端区分 WITHDRAWN 的显示口径：曾正式 →「已退出」，
             // 从未正式 →「已放弃候补」。
@@ -817,12 +1345,16 @@ public class BuddyService {
                     "SELECT * FROM invitation WHERE participation_id=? AND status='PENDING' ORDER BY id DESC LIMIT 1",
                     m.get("id"));
             if (!inv.isEmpty()) {
-                out.put("invitation_id", inv.get(0).get("id"));
-                // 库里存的就是东八区墙钟，直接返回，不再换算。
-                out.put("invitation_expires_at", asLocalDateTime(inv.get(0).get("expires_at")).toString());
+                var invitation = inv.get(0);
+                LocalDateTime expiresAt = asLocalDateTime(invitation.get("expires_at"));
+                if (expiresAt.isAfter(now)) {
+                    out.put("invitation_id", invitation.get("id"));
+                    // 库里存的就是东八区墙钟，直接返回，不再换算。
+                    out.put("invitation_expires_at", expiresAt.toString());
+                }
             }
             // 候补排名：排队中按 queued_at, id 排序
-            if ("WAITING".equals(m.get("status"))) {
+            if ("WAITING".equals(m.get("status")) && now.isBefore(asLocalDateTime(act.get("deadline")))) {
                 var queue = jdbc.queryForList(
                         "SELECT id FROM participation WHERE activity_id=? AND status='WAITING' " +
                         "ORDER BY queued_at, id", activityId);
@@ -837,6 +1369,13 @@ public class BuddyService {
     /** 阶段一：活动详情（原 ApiController 的组装逻辑下沉，供 GET 详情与移出成员复用）。
      *  userId 为 null 表示未登录：只返回公开计数，不含名单与本人状态。 */
     public Map<String, Object> activityDetail(long activityId, Long userId) {
+        return activityDetail(activityId, userId, null, null, null, null, null, null);
+    }
+
+    public Map<String, Object> activityDetail(long activityId, Long userId,
+                                              Integer confirmedPage, Integer confirmedPageSize,
+                                              Integer pendingPage, Integer pendingPageSize,
+                                              Integer waitingPage, Integer waitingPageSize) {
         var act = jdbc.queryForMap("SELECT a.*, u.nickname AS organizer_name FROM activity a " +
                 "JOIN app_user u ON u.id=a.organizer_id WHERE a.id=?", activityId);
         Map<String, Object> out = new LinkedHashMap<>(act);
@@ -856,20 +1395,102 @@ public class BuddyService {
                     "JOIN app_user u ON u.id=p.user_id WHERE p.activity_id=? AND i.status='PENDING' ORDER BY i.expires_at", activityId));
             // 任务 9（2026-11-09）：站内留言只在组织者视角返回，不上公开详情页。
             out.put("messages", listMessages(activityId));
+
+            var confirmed = jdbc.queryForList(
+                    "SELECT p.*, u.nickname FROM participation p JOIN app_user u ON u.id=p.user_id " +
+                    "WHERE p.activity_id=? AND p.status='FORMAL' ORDER BY p.joined_at, p.id", activityId);
+            LocalDateTime now = LocalDateTime.now();
+            var pending = jdbc.queryForList(
+                    "SELECT p.*, u.nickname, i.id AS invitation_id, i.expires_at AS invitation_expires_at " +
+                    "FROM participation p JOIN app_user u ON u.id=p.user_id " +
+                    "JOIN invitation i ON i.participation_id=p.id AND i.status='PENDING' AND i.expires_at > ? " +
+                    "WHERE p.activity_id=? AND p.status='INVITED' ORDER BY i.expires_at, i.id", ts(now), activityId);
+            var waiting = jdbc.queryForList(
+                    "SELECT p.*, u.nickname FROM participation p JOIN app_user u ON u.id=p.user_id " +
+                    "WHERE p.activity_id=? AND p.status='WAITING' ORDER BY p.queued_at, p.id", activityId);
+            // G06（2026-11-21）：报名截止后候补队列已失去意义，waiting 段按空返回（仍保留分页骨架）；
+            // confirmed/pending 段不受影响。
+            boolean signupClosed = !now.isBefore(asLocalDateTime(act.get("deadline")));
+            Map<String, Object> sections = new LinkedHashMap<>();
+            sections.put("confirmed", rosterSectionPage(confirmed, confirmedPage, confirmedPageSize));
+            sections.put("pending", rosterSectionPage(pending, pendingPage, pendingPageSize));
+            sections.put("waiting", rosterSectionPage(signupClosed ? List.of() : waiting, waitingPage, waitingPageSize));
+            out.put("roster_sections", sections);
         }
         return out;
+    }
+
+    private static Map<String, Object> rosterSectionPage(List<?> rows, Integer page, Integer pageSize) {
+        int p = page == null ? 1 : Math.max(1, page);
+        int size = pageSize == null ? 10 : Math.max(1, Math.min(50, pageSize));
+        int total = rows.size();
+        long offset = (long) (p - 1) * size;
+        int start = (int) Math.min(offset, total);
+        int end = (int) Math.min(offset + size, total);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("items", new ArrayList<>(rows.subList(start, end)));
+        out.put("page", p);
+        out.put("pageSize", size);
+        out.put("total", total);
+        return out;
+    }
+
+    /** DG-BE-05：移出限制判定。依据 participation_events 中该用户该活动最近一条关键事件：
+     *  MEMBER_REMOVED 为最近且其后无 MEMBER_REMOVAL_LIFTED（限制解除标记）/ 无新的 SIGNUP_* 事件时，限制生效。
+     *  普通 withdraw/abandon 只写 WITHDRAW/ABANDON 事件、不写 MEMBER_REMOVED，故不受影响。 */
+    private void checkRemovedRestriction(long activityId, long userId) {
+        var rows = jdbc.queryForList(
+                "SELECT event_type FROM participation_events WHERE activity_id=? AND user_id=? " +
+                        "AND event_type IN ('MEMBER_REMOVED','MEMBER_REMOVAL_LIFTED','SIGNUP_FORMAL','SIGNUP_WAITING') " +
+                        "ORDER BY id DESC LIMIT 1", activityId, userId);
+        if (rows.isEmpty()) return;
+        if ("MEMBER_REMOVED".equals(rows.get(0).get("event_type")))
+            throw new CodedException("MEMBER_REMOVED_RESTRICTED", "你已被组织者移出该活动，限制未解除前不能重新报名");
+    }
+
+    /** DG-BE-05（2026-11-21）：移出治理决定留痕。decision_type='REMOVAL' 已同步放宽 schema 双份
+     *  CHECK；存量库的 CHECK 不随建表脚本更新，部署时须另行 ALTER 放宽（见 merge 报告部署顺序）。
+     *  被移出者可凭本决定走申诉，复核撤销后由 GovernanceService 写 MEMBER_REMOVAL_LIFTED 解除限制。 */
+    private long insertRemovalDecision(long organizerId, long targetUserId, long activityId,
+                                       long participationId, String reason, LocalDateTime now) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbc.update(con -> {
+            PreparedStatement ps = con.prepareStatement(
+                    "INSERT INTO governance_decision(actor_id, previous_decision_id, decision_type, " +
+                            "subject_user_id, activity_id, participation_id, attendance_revision_id, " +
+                            "reason, result, decided_at, expires_at, available_at, appeal_until, " +
+                            "execution_state) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    new String[]{"id"});
+            ps.setLong(1, organizerId);
+            ps.setNull(2, java.sql.Types.BIGINT);
+            ps.setString(3, "REMOVAL");
+            ps.setLong(4, targetUserId);
+            ps.setLong(5, activityId);
+            ps.setLong(6, participationId);
+            ps.setNull(7, java.sql.Types.BIGINT);
+            ps.setString(8, reason);
+            ps.setString(9, "组织者移出成员");
+            ps.setTimestamp(10, ts(now));
+            ps.setNull(11, java.sql.Types.TIMESTAMP);
+            ps.setNull(12, java.sql.Types.TIMESTAMP);
+            ps.setNull(13, java.sql.Types.TIMESTAMP);
+            ps.setNull(14, java.sql.Types.VARCHAR);
+            return ps;
+        }, keyHolder);
+        return keyHolder.getKey().longValue();
     }
 
     /** 阶段一 B-CEM-03：组织者有据移出成员。
      *  校验组织者身份、原因（非空且 ≤200 字）与目标参与状态；INVITED 先作废邀请，
      *  WAITING 仅重排候补，FORMAL / INVITED 移出后立即 promote 递补。
-     *  被移出者收到「变更」通知；组织者本人操作不另通知。 */
+     *  被移出者收到「变更」通知；组织者本人操作不另通知。
+     *  移出同时落 DG-BE-05 重报限制（以 MEMBER_REMOVED 事件为据，signup 时判定）与 governance_action 审计留痕。 */
     @Transactional
     public Map<String, Object> removeMember(long activityId, long organizerId,
                                             long targetUserId, String reason) {
-        LocalDateTime now = LocalDateTime.now();
+        // E2-8：遵循 activity → participation 锁序，先锁活动行，再锁参与行。
         var act = jdbc.queryForMap(
-                "SELECT organizer_id, title FROM activity WHERE id=?", activityId);
+                "SELECT organizer_id, title FROM activity WHERE id=? FOR UPDATE", activityId);
         if (!Objects.equals(((Number) act.get("organizer_id")).longValue(), organizerId))
             throw new IllegalStateException("只有组织者可以移出成员");
         if (reason == null || reason.isBlank())
@@ -878,7 +1499,6 @@ public class BuddyService {
             throw new ValidationException("reason", "移出原因不能超过 200 字");
         if (targetUserId == organizerId)
             throw new IllegalStateException("不能移出组织者本人，如需终止活动请取消活动");
-        // 锁顺序与 withdraw 一致：先锁参与记录，再锁活动行。
         var parts = jdbc.queryForList(
                 "SELECT * FROM participation WHERE activity_id=? AND user_id=? " +
                         "AND status IN ('FORMAL','WAITING','INVITED') ORDER BY id DESC LIMIT 1 FOR UPDATE",
@@ -888,13 +1508,23 @@ public class BuddyService {
         var part = parts.get(0);
         long pid = ((Number) part.get("id")).longValue();
         String st = (String) part.get("status");
-        jdbc.queryForMap("SELECT id FROM activity WHERE id=? FOR UPDATE", activityId);
+        LocalDateTime now = nowSeconds();
         if (st.equals("INVITED")) {
             jdbc.update("UPDATE invitation SET status='INVALID' WHERE participation_id=? AND status='PENDING'", pid);
         }
         jdbc.update("UPDATE participation SET status='WITHDRAWN', updated_at=? WHERE id=?", ts(now), pid);
         if (st.equals("WAITING")) resequence(activityId);
         logEvent(pid, activityId, targetUserId, "MEMBER_REMOVED", st, "WITHDRAWN", reason);
+        // DG-BE-05 决定留痕（2026-11-21 修订）：写入 governance_decision（REMOVAL）作为申诉
+        // 解除通道的原决定，governance_action 审计行同步挂该决定 id（原口径只写审计行、无决定，
+        // 被移出者无从申诉；schema 双份 CHECK 已放宽含 REMOVAL，存量库部署时另行 ALTER）。
+        long removalDecisionId = insertRemovalDecision(
+                organizerId, targetUserId, activityId, pid, reason, now);
+        jdbc.update("INSERT INTO governance_action(actor_id, action, target_type, target_id, " +
+                        "decision_id, reason, detail, request_id, created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                organizerId, "MEMBER_REMOVED", "PARTICIPATION", pid, removalDecisionId,
+                reason, "activity_id=" + activityId + ", target_user_id=" + targetUserId,
+                null, ts(now));
         notify(targetUserId, activityId, null, "变更",
                 "组织者将你移出活动「" + act.get("title") + "」：" + reason,
                 "notify:remove:" + pid + ":" + now);
@@ -920,13 +1550,37 @@ public class BuddyService {
                 participationId);
     }
 
+    /** DG-BE-06：活动变更日志查询。仅组织者本人或管理员（admin 由控制器按治理口径传入）可见，其余 403。 */
+    public List<Map<String, Object>> listActivityChanges(long activityId, long requesterId, boolean admin) {
+        var act = jdbc.queryForMap("SELECT organizer_id FROM activity WHERE id=?", activityId);
+        if (!admin && ((Number) act.get("organizer_id")).longValue() != requesterId)
+            throw new ForbiddenException("只有组织者或管理员可以查看变更日志");
+        return jdbc.queryForList("SELECT id, activity_id, actor_id, change_type, field, old_value, new_value, reason, created_at " +
+                "FROM activity_change_log WHERE activity_id=? ORDER BY id DESC", activityId);
+    }
+
     /** 阶段一 A6 / outbox：通知列表只返回已发布的通知（全量，controller 分页）。 */
     public List<Map<String, Object>> listNotifications(long userId) {
+        return listNotifications(userId, false);
+    }
+
+    public List<Map<String, Object>> listNotifications(long userId, boolean unreadOnly) {
+        // G19（2026-11-21）：同时返回本条通知所关联邀请自身的状态（无 invitation_id 时为 null），
+        // 前端据此按本条邀请判状态，不再误用该活动「最近一条」邀请的状态。
         return jdbc.queryForList(
-                "SELECT n.*, i.expires_at AS expires_at FROM notification n " +
+                "SELECT n.*, i.expires_at AS expires_at, i.status AS invitation_status FROM notification n " +
                         "LEFT JOIN invitation i ON i.id=n.invitation_id " +
                         "WHERE n.user_id=? AND n.status='PUBLISHED' " +
+                        (unreadOnly ? "AND n.read_at IS NULL " : "") +
                         "ORDER BY n.created_at DESC, n.id DESC", userId);
+    }
+
+    public String latestInvitationStatus(long userId, long activityId) {
+        var statuses = jdbc.queryForList(
+                "SELECT i.status FROM invitation i JOIN participation p ON p.id=i.participation_id " +
+                        "WHERE p.activity_id=? AND p.user_id=? ORDER BY i.id DESC LIMIT 1",
+                String.class, activityId, userId);
+        return statuses.isEmpty() ? null : statuses.get(0);
     }
 
     public int unreadCount(long userId) {

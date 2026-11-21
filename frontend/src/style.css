@@ -14,6 +14,9 @@
   --card-pad-y: 22px;
   --card-pad-x: 24px;
 }
+/* 通知目标定位/恢复操作沿用自有令牌，不引入组件库。 */
+.notif-target-card { outline: 2px solid var(--orange); outline-offset: 2px; }
+.inline-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
 body {
   font-family: "Microsoft YaHei", system-ui, sans-serif;
   margin: 0;
@@ -21,95 +24,104 @@ body {
   color: var(--ink);
   line-height: 1.65;
 }
+/* 顶栏（2026-11-21 持续优化第 1 轮）：一条工作壳——品牌、主工作区导航、账户三个 zone。
+   主区用 navigation 语义，普通 Tab 顺序；账户下拉是披露，Esc 关闭并把焦点交还昵称按钮。
+   发布是唯一填充主操作。 */
 header {
   background: var(--cream);
   color: var(--ink);
   border-bottom: 1px solid var(--line);
-  padding: 18px 24px;
-  display: flex;
-  gap: 14px;
-  align-items: center;
-  flex-wrap: wrap;
+  padding: 10px 24px;
   position: sticky;
   top: 0;
   z-index: 10;
 }
+.header-shell {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  width: 100%;
+  max-width: 1280px;
+  min-height: 56px;
+  margin: 0 auto;
+}
+.header-brand { display: flex; align-items: center; gap: 10px; flex: none; }
+@media (max-width: 640px) { .header-brand { flex: 1; min-width: 0; } }
 header h1 {
   font-family: Georgia, "Songti SC", "STSong", "SimSun", serif;
-  font-size: 26px;
+  font-size: 23px;
   margin: 0;
   letter-spacing: 0.5px;
 }
-/* 顶栏三段（2026-11-16）：左品牌、中主导航、右治理/主题/用户菜单。
-   DOM 顺序为品牌 → 右组 → nav（移动端展开时 nav 才能整行落到最后），
-   桌面端用 order 把 nav 排到中间、右组排到最右。 */
-.header-brand { display: flex; align-items: center; gap: 10px; order: 1; flex: none; }
-.header-right { display: flex; align-items: center; gap: 8px; order: 3; flex: none; }
-/* 未登录顶栏右组（2026-11-19）：无中间 nav 吸收空白时，用 auto 左外边距推到右端，与登录后同位置不跳边。 */
+.logo { width: 36px; height: 36px; border-radius: 12px; flex: none; }
+.header-right { display: flex; align-items: center; gap: 8px; flex: none; margin-left: auto; }
 .header-right-anon { margin-left: auto; }
-/* Logo（2026-11-10）：两个搭子小人线条版，陶土橙 + 墨色细线描边，无填充；PWA 图标同款。 */
-.logo { width: 40px; height: 40px; border-radius: 12px; flex: none; }
-header nav { display: flex; gap: 8px; flex-wrap: wrap; order: 2; margin: 0 auto; }
+/* 导航条：当前视图 = 墨色粗体 + 陶土 2px 下划线；同组按钮等高、间距一致。 */
+header nav { display: flex; align-items: center; gap: 2px; margin: 0 auto; }
 header nav button {
+  min-height: 40px;
+  margin: 0;
+  padding: 8px 14px;
+  border: 1px solid transparent;
   background: transparent;
   color: var(--ink);
-  border: 1px solid transparent;
+  font-size: 15px;
+  white-space: nowrap;
 }
 header nav button:hover { border-color: var(--line); }
-/* 当前页：墨色粗体 + 陶土 2px 下划线，不再整块填充；填充只留给发布 CTA。 */
+header nav button[aria-current="page"],
 header nav button.nav-item.active,
-.nav-admin.active {
-  background: transparent;
+.user-menu-btn.account-current {
   border-color: transparent;
   color: var(--ink);
   font-weight: 700;
   box-shadow: inset 0 -2px 0 var(--orange);
 }
-header nav button.nav-item.active:hover, .nav-admin.active:hover { border-color: transparent; }
-/* 发布活动：全顶栏唯一填充主按钮（active 时也保持填充，只去掉下划线）。 */
+header nav button[aria-current="page"]:hover, header nav button.nav-item.active:hover { border-color: transparent; }
 header nav button.nav-cta,
-header nav button.nav-cta.active {
+header nav button.nav-cta[aria-current="page"] {
   background: var(--orange);
   border-color: var(--orange);
   color: #141413;
   font-weight: 600;
+  box-shadow: none;
 }
 header nav button.nav-cta:hover { border-color: var(--orange); filter: brightness(0.96); }
-header nav button.nav-cta.active { box-shadow: none; }
-/* 治理工作台入口（管理员才渲染）与「管理员」小字标签。 */
-.nav-admin { background: transparent; color: var(--ink); border: 1px solid transparent; margin: 0; }
-.nav-admin:hover { border-color: var(--line); }
-.admin-tag {
-  display: inline-block; margin-left: 5px; padding: 0 6px;
-  border: 1px solid var(--line); border-radius: 999px;
-  font-size: 11px; font-weight: 400; color: var(--grey); line-height: 1.5;
-}
-/* 通知未读：红点 + 数字徽标（替代原「（N 未读）」文字）。 */
 .unread-badge {
   display: inline-flex; align-items: center; justify-content: center;
   min-width: 18px; height: 18px; padding: 0 5px; margin-left: 6px;
   border-radius: 999px; background: #863311; color: #fff;
   font-size: 12px; font-weight: 700; line-height: 1;
 }
-/* 用户菜单（昵称 + ▾）：下拉右对齐卡片。 */
+/* 账户披露（昵称 + ▾）：普通按钮，不冒充应用菜单；点外/焦点离开/Esc 关闭。 */
 .user-menu { position: relative; }
-.user-menu-btn { margin: 0; background: transparent; color: var(--ink); border: 1px solid var(--line); }
+.user-menu-btn { display: inline-flex; align-items: center; gap: 6px; max-width: 220px; min-height: 40px; margin: 0; padding: 8px 12px; background: transparent; color: var(--ink); border: 1px solid var(--line); }
+.user-menu-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 768 平板宽度：昵称再长也不能把账户按钮顶出视口，导航按钮同步收窄内边距。 */
+@media (max-width: 900px) {
+  .header-shell { gap: 12px; }
+  header nav button { padding: 8px 10px; }
+  .user-menu-btn { max-width: 140px; }
+}
 .user-menu-pop {
   position: absolute; right: 0; top: calc(100% + 8px); z-index: 30;
-  min-width: 220px; padding: 8px;
+  min-width: 232px; padding: 8px;
   background: var(--paper); border: 1px solid var(--line); border-radius: 12px;
   box-shadow: 0 10px 28px rgba(20, 20, 19, 0.14);
 }
 .user-menu-greet {
-  margin: 6px 10px 8px; color: var(--grey); font-size: 13px;
-  line-height: 1.45; word-break: break-all;
+  display: flex; flex-direction: column; gap: 2px; margin: 6px 10px 8px;
+  color: var(--grey); font-size: 13px; line-height: 1.45; word-break: break-all;
 }
+.user-menu-greet strong { color: var(--ink); font-size: 14px; font-weight: 600; }
 .user-menu-pop button {
-  display: block; width: 100%; margin: 0 0 2px; padding: 8px 10px;
+  display: block; width: 100%; min-height: 40px; margin: 0 0 2px; padding: 8px 10px;
   background: transparent; border: 1px solid transparent; border-radius: 8px;
   color: var(--ink); font-size: 14px; text-align: left;
+  box-shadow: none;
 }
 .user-menu-pop button:hover { background: var(--orange-soft); border-color: var(--orange-line); }
+.user-menu-pop button[aria-current="page"] { box-shadow: inset 2px 0 0 var(--orange); font-weight: 600; }
 .user-menu-sep { border: 0; border-top: 1px solid var(--line); margin: 6px 4px; }
 .menu-unread-dot {
   position: absolute; top: 4px; right: 4px; width: 8px; height: 8px;
@@ -212,21 +224,18 @@ body.dark .login-page .hero-banner img { filter: brightness(0.55); }
 .card-cover img { display: block; width: 100%; aspect-ratio: 16 / 7; object-fit: cover; object-position: 50% 60%; filter: saturate(0.85); }
 .card-cover.detail-cover img { aspect-ratio: 21 / 4; }
 /* 任务 16（2026-11-13）：大厅卡片桌面端左图右文，配图占满卡片高度、圆角 12px；
-   移动端（≤640px）仍用上面的上下堆叠布局。只对大厅卡片收紧行距，信息一项不少。 */
+   2026-11-21：工作区变宽后改为双列卡片（≥1080px），信息顺序不变，窄桌面仍单列。
+   移动端（≤640px）上下堆叠布局不变。 */
 @media (min-width: 641px) {
-  .card.hall-card {
-    display: grid;
-    grid-template-columns: 200px minmax(0, 1fr);
-    gap: 16px;
-    align-items: stretch;
-    padding: 8px 16px;
-  }
+  .hall-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; margin-bottom: 16px; }
+  .hall-grid .card.hall-card { display: flex; flex-direction: column; margin: 0; min-width: 0; }
   .hall-card .hall-cover {
     position: relative;
-    min-height: 160px;
-    margin: 0;
-    border: 1px solid var(--line);
-    border-radius: 12px;
+    height: 148px;
+    margin: calc(-1 * var(--card-pad-y)) calc(-1 * var(--card-pad-x)) 12px;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    border-radius: 16px 16px 0 0;
     overflow: hidden;
     background: #FAF9F5;
   }
@@ -239,15 +248,29 @@ body.dark .login-page .hero-banner img { filter: brightness(0.55); }
     object-fit: cover;
     object-position: 50% 60%;
   }
-  .hall-card .card-body { min-width: 0; }
+  .hall-card .card-body { display: flex; flex-direction: column; flex: 1; min-width: 0; }
   .hall-card .card-head { gap: 10px; }
   .hall-card .card-head h3 { margin-bottom: 0; line-height: 1.3; }
   .hall-card .card-body p { margin: 0; }
+  .hall-card .hall-tags { margin: 2px 0 4px; }
   .hall-card .card-body .badge { margin-bottom: 0; padding: 2px 8px; line-height: 1.3; }
   .hall-card .card-meta { font-size: 14px; line-height: 1.5; }
-  .hall-card .card-desc { margin: 1px 0; line-height: 1.25; }
-  .hall-card .card-desc-cond { margin: 1px 0; line-height: 1.25; }
-  .hall-card .card-body > button { margin: 2px 8px 0 0; padding: 6px 12px; font-size: 14px; line-height: 1.3; }
+  .hall-card .card-desc { margin: 2px 0; line-height: 1.35; }
+  .hall-card .card-desc-cond { margin: 2px 0; line-height: 1.35; }
+  .hall-card .card-body > button { align-self: flex-start; margin: auto 0 0; padding: 6px 12px; font-size: 14px; line-height: 1.3; }
+  .hall-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px; }
+  .hall-tools input { flex: 1 1 200px; min-width: 0; margin: 0; }
+  .hall-tools select { flex: 0 1 148px; min-width: 0; margin: 0; }
+  .hall-tools > button { margin: 0; }
+}
+@media (min-width: 1080px) {
+  .hall-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .hall-card .hall-cover { height: 156px; }
+}
+@media (max-width: 640px) {
+  .hall-tools { display: flex; flex-wrap: wrap; gap: 8px; }
+  .hall-tools input, .hall-tools select, .hall-tools > button { flex: 1 1 100%; width: 100%; margin: 0; box-sizing: border-box; }
+  .hall-tools .hall-seat-filter { flex: 0 0 auto; }
 }
 .card-head { display: flex; align-items: flex-start; gap: 12px; }
 .card-head h3 { flex: 1; }
@@ -302,6 +325,9 @@ input, select, textarea {
   color: var(--ink);
   font-size: 15px;
 }
+/* 2026-11-20 任务 2：原生 checkbox 与文字共用点击区，沿用现有陶土色 token。 */
+.hall-seat-filter { display: inline-flex; align-items: center; gap: 8px; min-height: 44px; padding: 0 8px; font-size: 15px; cursor: pointer; vertical-align: middle; }
+.hall-seat-filter input { width: 20px; height: 20px; margin: 0; padding: 0; flex: none; accent-color: var(--orange); cursor: pointer; }
 /* 任务 20：多行留言框沿用页面字体，避免回退到等宽字体。 */
 textarea { font-family: inherit; }
 input:focus, select:focus, textarea:focus { outline: 2px solid var(--orange); outline-offset: 1px; border-color: var(--orange); }
@@ -352,6 +378,8 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--orange); ou
 /* 任务 7（2026-11-10）：卡片标题可点进详情 */
 .card-title { cursor: pointer; }
 .card-title:hover { text-decoration: underline; text-underline-offset: 3px; }
+/* G22：保留原标题/摘要排版，使用原生按钮提供相同鼠标与键盘入口。 */
+.card-title-button, .notif-read-button { width: 100%; display: block; padding: 0; margin: 0; border: 0; border-radius: 0; background: transparent; color: inherit; font: inherit; line-height: inherit; text-align: left; overflow-wrap: anywhere; }
 /* 任务 15（2026-11-10）：详情页术语解释区 */
 .term-help { margin: 8px 0; font-size: 14px; }
 .term-help summary { cursor: pointer; color: var(--grey); }
@@ -408,14 +436,15 @@ input:focus, select:focus, textarea:focus { outline: 2px solid var(--orange); ou
 .notif-fold-note { margin: 6px 0 0; }
 .notif-fold-toggle { margin: 4px 0 0; }
 .notif-fold-list { margin-top: 6px; border-top: 1px solid var(--line); }
-p.notif-fold-item { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 0; padding: 7px 0 7px 12px; border-bottom: 1px solid var(--line); color: var(--grey); font-size: 13px; cursor: pointer; }
-p.notif-fold-item:last-child { border-bottom: 0; }
+.notif-fold-item { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; width: 100%; margin: 0; padding: 7px 0 7px 12px; background: transparent; border: 0; border-radius: 0; border-bottom: 1px solid var(--line); color: var(--grey); font-size: 13px; text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.notif-fold-item:last-child { border-bottom: 0; }
 .notif-fold-text { flex: 1; min-width: 0; }
 .notif-fold-time { color: var(--grey); font-size: 12px; }
 .notif-action { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
 .notif-action-left { display: flex; align-items: center; gap: 8px; }
 .notif-cta, .notif-rank-btn { margin: 0; }
 .notif-time { white-space: nowrap; }
+.notif-time-only { margin: 8px 0 0; text-align: right; }
 .notif-empty { margin: 8px 0; }
 .notif-empty p { margin-bottom: 8px; }
 /* 任务 12：首屏骨架屏 */
@@ -442,6 +471,14 @@ section.card.publish-form .dt-row { max-width: none; }
 /* 任务 18：登录输入框正式标签；任务 5：发布表单标签 15px 墨色 */
 .field-label { display: block; font-size: 15px; color: var(--ink); font-weight: 600; margin: 10px 0 2px; }
 .field-hint { display: block; font-size: 13px; color: var(--grey); margin-top: 4px; }
+/* 任务 17（2026-11-20）：地点例子默认折叠，摘要用主题色文字链接样式；
+   沿用原生 <details> 的三角标记与键盘行为，展开后与提示同字号。 */
+.field-examples { margin-top: 6px; }
+.field-examples > summary { display: inline-block; cursor: pointer; font-size: 13px; color: #8F4A33; padding: 2px 0; }
+.field-examples > summary:hover { text-decoration: underline; }
+body.dark .field-examples > summary { color: #f4ae94; }
+/* 任务 13（2026-11-20）：条件行下的通用兜底指引，比正文退一级。 */
+.condition-fallback { margin: 2px 0 14px; }
 /* 登录区：输入框纵向排列，避免三框并排在窄屏下拥挤 */
 .login input { display: block; width: 100%; max-width: 360px; box-sizing: border-box; margin: 6px 0; }
 .login .field-label { max-width: 360px; }
@@ -472,9 +509,17 @@ section.card label input, section.card label select, section.card label textarea
 .dt-row input { flex: 1; min-width: 0; margin: 0; }
 .dt-row button { margin: 0; white-space: nowrap; }
 .warn-hint { color: #863311; font-weight: 600; }
+.picker-backdrop {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; align-items: flex-end; justify-content: center;
+  padding: 16px;
+  background: rgba(20, 20, 19, 0.35);
+  backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+}
 .picker-pop {
-  position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
-  z-index: 50; width: min(92vw, 340px); background: var(--paper);
+  position: relative; box-sizing: border-box;
+  width: min(92vw, 340px); background: var(--paper);
+  max-height: calc(100dvh - 32px); overflow-y: auto;
   border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px;
 }
 .picker-pop h4 { margin: 0 0 8px; font-family: Georgia, "Songti SC", "STSong", "SimSun", serif; font-size: 17px; }
@@ -494,21 +539,28 @@ section.card label input, section.card label select, section.card label textarea
 .message-item input { width: 100%; max-width: 440px; box-sizing: border-box; }
 .reschedule-box { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--line); }
 @media (max-width: 640px) {
-  header { padding: 12px 14px; position: static; gap: 6px; }
-  header h1 { font-size: 20px; }
-  /* 任务 14：窄屏顶栏收紧（间距/字号/按钮内边距），深色切换带短文字标签时顶栏仍只占一行。 */
-  header button { padding: 9px 10px; }
-  /* 2026-11-16：顶行 = 品牌 + 主题 + ☰；☰ 旁小红点保证未读可见。 */
-  .header-brand { order: 1; gap: 8px; }
-  .header-right { order: 2; margin-left: auto; gap: 6px; }
-  header nav { order: 3; }
-  .nav-admin, .user-menu { display: none; }
-  header .menu-btn { display: inline-block; position: relative; margin: 0; }
+  /* 手机顶栏：品牌 + 主题 + ☰ 一条 60px 内；导航收进覆盖式抽屉，主界面不重排。 */
+  header { padding: 10px max(12px, env(safe-area-inset-right)) 10px max(12px, env(safe-area-inset-left)); position: static; }
+  header h1 { font-size: 19px; }
+  .header-shell { gap: 6px; min-height: 44px; }
+  .header-brand { gap: 8px; }
+  .header-right { gap: 6px; }
+  .logo { width: 32px; height: 32px; }
+  .user-menu { display: none; }
+  header .menu-btn { display: inline-block; position: relative; min-height: 44px; margin: 0; padding: 8px 10px; }
+  /* 2026-11-20：日期选择器在手机上走右侧抽屉（覆盖式，不内联挤占表单），
+     与主导航抽屉同一覆盖纪律；只改呈现位置，不动日期字段与处理逻辑。 */
+  .picker-backdrop { align-items: stretch; justify-content: flex-end; padding: 0; }
+  .picker-pop {
+    width: min(86vw, 360px); max-width: 100%; min-width: 0;
+    max-height: 100dvh; overflow-y: auto;
+    border-radius: 16px 0 0 16px; border-right: 0;
+  }
   /* 任务 14：窄屏深色切换留短文字标签「深色/浅色」，不只剩图标。 */
   .theme-btn .theme-label { display: none; }
   .theme-btn .theme-label-short { display: inline; }
-  .theme-btn { padding: 9px 10px; margin-left: 0; }
-  /* 2026-11-17：窄屏导航改覆盖式侧边抽屉（不占主界面布局），桌面顶栏零改动。 */
+  .theme-btn { min-height: 44px; padding: 8px 10px; margin-left: 0; }
+  /* 覆盖式侧边抽屉：带边框 + 高斯模糊遮罩，打开时锁定滚动；关闭时不可聚焦。 */
   .nav-backdrop {
     display: block; position: fixed; inset: 0; z-index: 40;
     background: rgba(20, 20, 19, 0.25);
@@ -518,7 +570,7 @@ section.card label input, section.card label select, section.card label textarea
     display: flex;
     position: fixed; top: 0; right: 0;
     height: 100vh; height: 100dvh;
-    width: min(78vw, 320px);
+    width: min(86vw, 340px);
     z-index: 41;
     margin: 0;
     background: var(--paper);
@@ -527,23 +579,29 @@ section.card label input, section.card label select, section.card label textarea
     flex-direction: column;
     align-items: stretch;
     flex-wrap: nowrap;
-    gap: 8px;
-    padding: 18px 16px;
+    gap: 4px;
+    padding: max(14px, env(safe-area-inset-top)) 14px calc(18px + env(safe-area-inset-bottom));
     overflow-y: auto;
+    overscroll-behavior: contain;
     transform: translateX(105%);
     transition: transform 240ms ease;
     visibility: hidden;
   }
   header nav.open { transform: translateX(0); visibility: visible; }
-  header nav .nav-mobile-only { display: block; }
-  header nav.open button { text-align: left; }
-  header nav.open .nav-cta { text-align: center; }
-  .nav-mobile-greet { margin: 10px 0 4px; color: var(--grey); font-size: 14px; word-break: break-all; }
-  main { padding: 16px; }
+  header nav .nav-mobile-only { display: flex; }
+  .nav-mobile-head { align-items: center; justify-content: space-between; margin: -4px 0 6px; color: var(--grey); font-size: 14px; }
+  .nav-mobile-head strong { color: var(--ink); font-size: 16px; }
+  .nav-mobile-head .drawer-close { min-width: 44px; min-height: 44px; margin: 0; padding: 0; font-size: 24px; line-height: 1; }
+  header nav button { min-height: 48px; padding: 12px 14px; text-align: left; border-radius: 10px; }
+  header nav button[aria-current="page"], header nav button.nav-item.active { border-radius: 10px; box-shadow: inset 3px 0 0 var(--orange); background: var(--orange-soft); }
+  header nav button.nav-cta { margin: 6px 0; text-align: center; box-shadow: none; }
+  .nav-mobile-greet { margin: 14px 2px 2px; color: var(--grey); font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+  main { padding: 14px max(12px, env(safe-area-inset-right)) calc(28px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); }
   .card { --card-pad-y: 16px; --card-pad-x: 16px; padding: 16px; border-radius: 14px; }
   .card h3 { font-size: 19px; }
   button { padding: 9px 14px; }
   section.card label input, section.card label select, section.card label textarea { max-width: none; }
+  .signup-actions button, .inline-actions button, .notif-action button, .notif-tabs button { min-height: 44px; }
 }
 /* 2026-11-17：系统偏好减少动效时，抽屉不做滑入滑出动画。 */
 @media (prefers-reduced-motion: reduce) {
@@ -770,7 +828,90 @@ body.dark .organizer-zone { background: #20201f; }
 .my-gov-details > summary::-webkit-details-marker { display: none; }
 .my-gov-details > summary::before { content: '▸ '; color: var(--grey); }
 .my-gov-details[open] > summary::before { content: '▾ '; }
-/* 任务 16（2026-11-19）：发布表单的「📅 选择」按钮做得更显眼。 */
-.dt-row .picker-btn { background: var(--paper); border-color: var(--orange-line); color: var(--ink); font-weight: 600; }
+/* 任务 16（2026-11-19）：发布表单的「📅 选择」按钮做得更显眼。
+   任务 14（2026-11-20）：改主题色实底，与「发布」主按钮同一视觉层级；
+   文字用按钮主色同款墨色 #141413（在陶土橙底上约 6:1，见 button.primary 注释）。 */
+.dt-row .picker-btn { background: var(--orange); border-color: var(--orange); color: #141413; font-weight: 600; }
+.dt-row .picker-btn:hover { border-color: var(--orange); filter: brightness(0.96); }
 .notif-rank-note { margin: 2px 0 0; }
 .msg-action { margin-left: 8px; padding: 6px 12px; font-size: 14px; }
+
+/* ===== 2026-11-21 持续优化第 1 轮：工作区宽度、名单表格、手机阅读 ===== */
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+}
+/* 桌面工作区：大厅与名单用更宽的内容区；其他阅读型页面仍保持 980px。 */
+.workspace-main { max-width: 1280px; padding: 24px 32px 48px; }
+@media (max-width: 900px) { .workspace-main { padding: 20px 20px 40px; } }
+@media (max-width: 640px) { .workspace-main { padding: 14px max(12px, env(safe-area-inset-right)) calc(28px + env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); } }
+
+/* 组织者名单页：页首一行放活动与返回，阶段/截止/容量做成三个读数。 */
+.roster-page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.roster-page-head h2 { margin: 2px 0 0; font-family: Georgia, "Songti SC", "STSong", "SimSun", serif; font-size: 24px; line-height: 1.35; overflow-wrap: anywhere; }
+.roster-page-head > button { margin: 0; }
+.roster-eyebrow { margin: 0; color: var(--grey); font-size: 13px; letter-spacing: 0.02em; }
+.roster-overview { display: flex; flex-wrap: wrap; gap: 10px 28px; margin: 0 0 14px; padding: 12px 14px; background: #F0EEE6; border: 1px solid var(--line); border-radius: 12px; }
+body.dark .roster-overview { background: #20201f; }
+.roster-overview div { min-width: 0; }
+.roster-overview dt { margin: 0; color: var(--grey); font-size: 12px; line-height: 1.5; }
+.roster-overview dd { margin: 1px 0 0; font-size: 15px; font-weight: 600; line-height: 1.5; overflow-wrap: anywhere; }
+.roster-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.roster-toolbar .tabs { margin-bottom: 10px; }
+.roster-toolbar > button { margin: 0 0 10px; }
+
+/* 名单表格：原生表头 + 行内操作，保留页签分页与仅组织者可见的边界。 */
+.roster-table { width: 100%; border-collapse: collapse; margin: 4px 0 10px; }
+.roster-table th, .roster-table td { padding: 11px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+.roster-table thead th { color: var(--grey); font-size: 13px; font-weight: 600; white-space: nowrap; }
+.roster-table tbody tr:hover { background: var(--orange-soft); }
+.roster-table th[scope="row"] { font-size: 15px; font-weight: 600; overflow-wrap: anywhere; }
+.roster-table .roster-expiry time { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.roster-table .roster-action { width: 1%; text-align: right; white-space: nowrap; }
+.roster-table .roster-action button { margin: 0; }
+/* 宽屏：列宽固定，余量留给昵称（长昵称不折行），操作列贴右但不再被拉出大片空白。 */
+@media (min-width: 641px) {
+  .roster-table { table-layout: fixed; }
+  .roster-table .roster-status { width: 18%; }
+  .roster-table .roster-expiry { width: 22%; }
+  .roster-table .roster-action { width: 168px; }
+}
+.roster-member .hint { font-size: 13px; }
+@media (prefers-reduced-motion: reduce) { .roster-table tbody tr:hover { background: transparent; } }
+
+/* 手机：表格行转为带标签的卡片，保持列含义，不横向滚动。 */
+@media (max-width: 640px) {
+  .roster-page-head h2 { font-size: 20px; }
+  .roster-page-head > button { width: 100%; min-height: 44px; }
+  .roster-overview { display: grid; grid-template-columns: minmax(0, 1fr); gap: 0; padding: 6px 12px; }
+  .roster-overview div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 7px 0; border-bottom: 1px dashed var(--line); }
+  .roster-overview div:last-child { border-bottom: 0; }
+  .roster-overview dd { text-align: right; }
+  .roster-toolbar { align-items: stretch; }
+  .roster-toolbar .tabs { margin-bottom: 6px; }
+  .roster-toolbar > button { width: 100%; margin: 0 0 10px; }
+  .roster-table, .roster-table tbody, .roster-table tr, .roster-table th, .roster-table td { display: block; }
+  .roster-table thead { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .roster-table tr { margin: 0 0 8px; padding: 10px 12px; background: var(--paper); border: 1px solid var(--line); border-radius: 12px; }
+  .roster-table tbody tr:hover { background: var(--paper); }
+  .roster-table th, .roster-table td { padding: 2px 0; border: 0; }
+  .roster-table th[scope="row"] { font-size: 16px; padding-bottom: 4px; }
+  .roster-table td { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 32px; }
+  .roster-table td::before { content: attr(data-label); color: var(--grey); font-size: 13px; flex: none; }
+  .roster-table td.roster-action { width: auto; text-align: left; min-height: 44px; }
+  .roster-table td.roster-action button { min-height: 44px; }
+}
+
+/* 手机：通知卡的行动区与时间分行，主行动不再被挤成竖排按钮。 */
+@media (max-width: 640px) {
+  .notif-card { padding: 14px; }
+  .notif-badge-row { row-gap: 4px; }
+  .notif-summary { margin: 8px 0 6px; line-height: 1.6; }
+  .notif-action { flex-direction: column; align-items: stretch; gap: 8px; }
+  .notif-action-left { flex-wrap: wrap; gap: 8px; }
+  .notif-action-left > button { flex: 1 1 auto; min-height: 44px; }
+  .notif-time { align-self: flex-end; }
+  .notif-tabs button { min-height: 40px; padding: 6px 12px; }
+  .notif-readall { min-height: 40px; }
+  .notif-time-only { text-align: left; margin-top: 8px; }
+}

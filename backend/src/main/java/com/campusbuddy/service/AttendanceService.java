@@ -320,6 +320,16 @@ public class AttendanceService {
         return queryAttendance(activityId, organizer ? null : Long.valueOf(requesterId));
     }
 
+    /** 管理员查看全量出勤名单；与 listAttendance 一样在事务内补建已开始活动的快照。 */
+    @Transactional
+    public List<Map<String, Object>> listAttendanceForAdmin(long activityId) {
+        var act = jdbc.queryForMap("SELECT * FROM activity WHERE id=?", activityId);
+        String status = (String) act.get("status");
+        if ("RUNNING".equals(status) || "ENDED".equals(status))
+            ensureSnapshotForActivity(act);
+        return queryAttendance(activityId, null);
+    }
+
     private List<Map<String, Object>> queryAttendance(long activityId, Long userId) {
         String base = "SELECT att.*, u.nickname AS nickname, c.checkin_at AS checkin_at " +
                 "FROM attendance att JOIN app_user u ON u.id=att.user_id " +
@@ -420,6 +430,63 @@ public class AttendanceService {
                 "notify:attendance:" + attendanceId + ":v" + newVersion);
         // 11. 返回更新后的单行（附昵称与签到时间）。
         return attendanceRow(activityId, targetUserId);
+    }
+
+    /** 管理员仅在核对窗内代核组织者本人；已定版更正仍走申诉复核 / adminCorrect。 */
+    @Transactional
+    public Map<String, Object> adminVerifyOrganizer(long activityId, long adminId,
+                                                   String result, String evidence) {
+        // 先锁活动，再补建快照并锁出勤行，保持活动在先的核对写入顺序。
+        var act = jdbc.queryForMap("SELECT * FROM activity WHERE id=? FOR UPDATE", activityId);
+        long organizerId = ((Number) act.get("organizer_id")).longValue();
+        if (!"ENDED".equals(act.get("status")))
+            throw new IllegalStateException("活动结束后才可核对出勤");
+        ensureSnapshotForActivity(act);
+        var rows = jdbc.queryForList(
+                "SELECT * FROM attendance WHERE activity_id=? AND user_id=? FOR UPDATE",
+                activityId, organizerId);
+        if (rows.isEmpty())
+            throw new IllegalStateException("组织者不在出勤名单中");
+        var att = rows.get(0);
+        long attendanceId = ((Number) att.get("id")).longValue();
+        long currentVersion = ((Number) att.get("version")).longValue();
+        LocalDateTime now = LocalDateTime.now();
+        if (att.get("finalized_at") != null)
+            throw new IllegalStateException("出勤已定版，管理员更正请走申诉复核");
+        // 沿用 verify 的独立核对窗与边界，不能因 sweep 尚未定版而允许窗外代核。
+        LocalDateTime end = asLocalDateTime(act.get("end_time"));
+        if (now.isAfter(end.plusMinutes(verifyWindowMinutes)))
+            throw new IllegalStateException("核对期已结束，更正请走申诉复核");
+        if (result == null || !RESULTS.contains(result))
+            throw new ValidationException("result", "出勤结果不合法");
+        // 严格对照 verify 第 8 步：已有结论（version>1 或 decided_by 非空）必填；
+        // 首次核对仅 PRESENT 无签到或 ABSENT_VERIFIED 有签到必填，
+        // EXEMPT / UNVERIFIED 不因存在签到事实就单独要求依据。
+        boolean hasConclusion = currentVersion > 1 || att.get("decided_by") != null;
+        Integer checkinCount = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM checkin WHERE activity_id=? AND user_id=?",
+                Integer.class, activityId, organizerId);
+        boolean hasCheckin = checkinCount != null && checkinCount > 0;
+        boolean needEvidence = hasConclusion
+                || ("PRESENT".equals(result) && !hasCheckin)
+                || ("ABSENT_VERIFIED".equals(result) && hasCheckin);
+        if (needEvidence && (evidence == null || evidence.isBlank()))
+            throw new ValidationException("evidence", "覆盖签到事实或更正已有结论须填写依据");
+        long newVersion = currentVersion + 1;
+        jdbc.update("UPDATE attendance SET result=?, version=?, decided_by=?, updated_at=? WHERE id=?",
+                result, newVersion, adminId, ts(now), attendanceId);
+        String reason = (evidence != null && !evidence.isBlank())
+                ? evidence.trim() : "管理员代组织者本人核对";
+        jdbc.update("INSERT INTO attendance_revision(attendance_id, version, actor_id, result, reason, " +
+                        "available_at, appeal_until) VALUES (?,?,?,?,?,?,?)",
+                attendanceId, newVersion, adminId, result, reason,
+                ts(now), ts(now.plusDays(APPEAL_DAYS)));
+        notify(organizerId, activityId, "变更",
+                "活动「" + act.get("title") + "」你的出勤（组织者本人）已由管理员核对为：" + resultLabel(result) + "。",
+                "notify:attendance:" + attendanceId + ":v" + newVersion);
+        Map<String, Object> out = attendanceRow(activityId, organizerId);
+        out.put("new_version", newVersion);
+        return out;
     }
 
     private static String resultLabel(String result) {

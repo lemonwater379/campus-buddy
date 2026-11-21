@@ -256,7 +256,7 @@ CREATE TABLE IF NOT EXISTS governance_decision (
     actor_id               BIGINT REFERENCES app_user(id),
     previous_decision_id   BIGINT REFERENCES governance_decision(id),
     decision_type          VARCHAR(24) NOT NULL CHECK (decision_type IN
-                               ('BAN','UNBAN','DELIST','RELIST','COMPLAINT','ATTENDANCE','REVIEW','RECOVERY')),
+                               ('BAN','UNBAN','DELIST','RELIST','COMPLAINT','ATTENDANCE','REVIEW','RECOVERY','REMOVAL')),
     subject_user_id        BIGINT REFERENCES app_user(id),
     activity_id            BIGINT REFERENCES activity(id),
     participation_id       BIGINT REFERENCES participation(id),
@@ -328,12 +328,16 @@ CREATE TABLE IF NOT EXISTS appeal (
     submitted_at       TIMESTAMP NOT NULL DEFAULT now(),
     reviewed_at        TIMESTAMP,
     created_at         TIMESTAMP NOT NULL DEFAULT now(),
-    updated_at         TIMESTAMP NOT NULL DEFAULT now(),
-    UNIQUE (decision_id),
-    UNIQUE (complaint_id)
+    updated_at         TIMESTAMP NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_appeal_state ON appeal(state, submitted_at);
 CREATE INDEX IF NOT EXISTS idx_appeal_applicant ON appeal(applicant_id);
+-- S2（2026-11-21）：申诉唯一约束改为「仅 PENDING 唯一」——同一决定/举报同时至多一条未结申诉，
+-- 已结申诉（UPHELD/OVERTURNED/CORRECTED）不再阻止后续新申诉（存量库迁移见 merge/work/server-ddl-s2-pg.sql）。
+CREATE UNIQUE INDEX IF NOT EXISTS uq_appeal_pending_decision
+    ON appeal(decision_id) WHERE state = 'PENDING';
+CREATE UNIQUE INDEX IF NOT EXISTS uq_appeal_pending_complaint
+    ON appeal(complaint_id) WHERE state = 'PENDING';
 
 CREATE TABLE IF NOT EXISTS recovery_request (
     id                 BIGSERIAL PRIMARY KEY,
@@ -357,6 +361,25 @@ CREATE TABLE IF NOT EXISTS recovery_request (
 CREATE INDEX IF NOT EXISTS idx_recovery_applicant ON recovery_request(applicant_id, state);
 CREATE INDEX IF NOT EXISTS idx_recovery_state ON recovery_request(state, applied_at);
 
+-- DG-BE-07（SDD §7）：暂存证据的 complaint_id、appeal_id、recovery_request_id 均为 NULL，暂存期间不可下载。
+CREATE TABLE IF NOT EXISTS evidence_file (
+    id                  BIGSERIAL PRIMARY KEY,
+    owner_id            BIGINT NOT NULL REFERENCES app_user(id),
+    complaint_id        BIGINT REFERENCES complaint(id),
+    appeal_id           BIGINT REFERENCES appeal(id),
+    recovery_request_id BIGINT REFERENCES recovery_request(id),
+    storage_key         VARCHAR(255) NOT NULL,
+    original_name       VARCHAR(255) NOT NULL,
+    mime_type           VARCHAR(64) NOT NULL,
+    size_bytes          BIGINT NOT NULL,
+    sha256              BYTEA NOT NULL,
+    created_at          TIMESTAMP NOT NULL DEFAULT now(),
+    UNIQUE (storage_key)
+);
+CREATE INDEX IF NOT EXISTS idx_evidence_file_complaint_id ON evidence_file(complaint_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_file_appeal_id ON evidence_file(appeal_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_file_recovery_request_id ON evidence_file(recovery_request_id);
+
 CREATE TABLE IF NOT EXISTS governance_action (
     id          BIGSERIAL PRIMARY KEY,
     actor_id    BIGINT REFERENCES app_user(id),
@@ -371,3 +394,27 @@ CREATE TABLE IF NOT EXISTS governance_action (
 );
 CREATE INDEX IF NOT EXISTS idx_governance_action_time ON governance_action(created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_governance_action_target ON governance_action(target_type, target_id);
+
+-- DG-BE-06（2026-11-20）：活动字段级变更日志（一行一字段；field 为空表示整活动级事件如 CREATE/CANCEL 的状态行由 field=status 记）。
+CREATE TABLE IF NOT EXISTS activity_change_log (
+    id          BIGSERIAL PRIMARY KEY,
+    activity_id BIGINT NOT NULL REFERENCES activity(id),
+    actor_id    BIGINT REFERENCES app_user(id),
+    change_type VARCHAR(24) NOT NULL,
+    field       VARCHAR(32),
+    old_value   TEXT,
+    new_value   TEXT,
+    reason      VARCHAR(500),
+    created_at  TIMESTAMP NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_activity_change_log_activity ON activity_change_log(activity_id, id);
+
+-- DG-BE-02 结构清单补齐（2026-11-20）：会话表此前仅由 AuthService 运行时懒建，此处补声明式 DDL；
+-- 运行时懒初始化口径不变，本表不纳入 SchemaReadinessChecker 的 REQUIRED_TABLES。
+CREATE TABLE IF NOT EXISTS auth_session (
+    token_hash     VARCHAR(64) PRIMARY KEY,
+    user_id        BIGINT NOT NULL,
+    created_at     BIGINT NOT NULL,
+    last_access_at BIGINT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_auth_session_user ON auth_session(user_id);

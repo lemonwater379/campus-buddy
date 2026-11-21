@@ -110,17 +110,18 @@ public class ApiSupport {
         return value;
     }
 
-    /** 分页参数：page 默认 1，pageSize 默认 20 并钳制在 1..100。 */
+    /** 分页参数：page 默认 1，pageSize 默认 10 并钳制在 1..50（设计 §4 列表页规约）。 */
     public static int[] pagination(Integer page, Integer pageSize) {
         int p = (page == null || page < 1) ? 1 : page;
-        int ps = (pageSize == null) ? 20 : pageSize;
+        int ps = (pageSize == null) ? 10 : pageSize;
         if (ps < 1) ps = 1;
-        if (ps > 100) ps = 100;
+        if (ps > 50) ps = 50;
         return new int[]{p, ps};
     }
 
     /** 全量列表在 controller 切片（数据量小，避免 service 改签名）。
-     *  page 越界时返回空 items，但 total 仍是全量条数。 */
+     *  page 越界时返回空 items，但 total 仍是全量条数。
+     *  页形状按设计 §4 为 items/page/size/total；兼容现行前端保留 pageSize，与 size 同值。 */
     public static Map<String, Object> page(List<?> items, int page, int pageSize) {
         int total = items == null ? 0 : items.size();
         long startL = (long) (page - 1) * pageSize;
@@ -133,6 +134,7 @@ public class ApiSupport {
         out.put("items", pageItems);
         out.put("page", page);
         out.put("pageSize", pageSize);
+        out.put("size", pageSize);
         out.put("total", total);
         return out;
     }

@@ -43,7 +43,7 @@ import java.util.function.Supplier;
 /**
  * /api/v1 统一接口层（阶段一，2026-11-15）。
  * 所有响应都经 ApiSupport 包成 {success,code,message,data,serverTime,traceId}，
- * ID 一律字符串化；列表按 {items,page,pageSize,total} 分页；
+ * ID 一律字符串化；列表按 {items,page,pageSize,size,total} 分页；
  * 写接口支持 Idempotency-Key 回执。业务规则与文案沿用旧 ApiController。
  */
 @RestController
@@ -91,9 +91,18 @@ public class ApiV1Controller {
         }
     }
 
+    /**
+     * G17：未登录（Bearer 缺失 / 会话过期 / 失效）专用异常。
+     * 与上传接口既有口径一致，由 errorResponse 映射为 HTTP 401 + code=UNAUTHORIZED，
+     * 供前端进入重新登录续接；其它业务错误仍沿用 IllegalStateException → 400。
+     */
+    public static class UnauthorizedException extends RuntimeException {
+        public UnauthorizedException(String message) { super(message); }
+    }
+
     private Long require(String authHeader) {
         Long id = auth.userId(authHeader);
-        if (id == null) throw new IllegalStateException("未登录");
+        if (id == null) throw new UnauthorizedException("未登录");
         // 停用账号的旧 token 不能再操作：登录时拦停用只是第一道关，
         // token 发出后被停用的账号必须在每次鉴权时再查一次状态。
         var user = auth.me(id);
@@ -133,6 +142,11 @@ public class ApiV1Controller {
 
     @ExceptionHandler(ForbiddenException.class)
     public ResponseEntity<String> handleForbidden(ForbiddenException e) {
+        return errorResponse(e);
+    }
+
+    @ExceptionHandler(UnauthorizedException.class)
+    public ResponseEntity<String> handleUnauthorized(UnauthorizedException e) {
         return errorResponse(e);
     }
 
@@ -199,6 +213,10 @@ public class ApiV1Controller {
             return support.json(support.error("VALIDATION", ve.getMessage(),
                     Map.of("fieldErrors", ve.fieldErrors())), HttpStatus.BAD_REQUEST);
         }
+        // G17：未登录 → 401，与上传接口的 UNAUTHORIZED 口径保持一致。
+        if (e instanceof UnauthorizedException) {
+            return support.json(support.error("UNAUTHORIZED", e.getMessage(), null), HttpStatus.UNAUTHORIZED);
+        }
         // CodedException 是 IllegalStateException 子类，必须先于其父类分支判断。
         if (e instanceof CodedException ce) {
             return support.json(support.error(ce.code(), ce.getMessage(), null), HttpStatus.BAD_REQUEST);
@@ -221,9 +239,12 @@ public class ApiV1Controller {
     // ---- 幂等包装 ----
 
     /**
-     * 写接口统一入口：带 Idempotency-Key 时按 (用户, 接口模板, 键) 去重。
-     * 同键同请求摘要回放首次响应（状态码 + body）；同键异摘要返回 409 IDEMPOTENCY_CONFLICT。
-     * handler 内部抛出的业务异常先转成 envelope 再存储，保证重试拿到同一错误。
+     * 写接口统一入口：带 {@code Idempotency-Key} 时，由 {@code IdempotencyService.execute()}
+     * 按 (用户, 接口模板, 键) 先占位再执行；无键或空白键直接执行 handler。
+     * 同键同请求摘要回放首次响应（状态码相同、body 逐字一致，含业务错误响应）；
+     * 同键异摘要返回 409 {@code IDEMPOTENCY_CONFLICT}；
+     * 同键同摘要遇到执行中占位且等待后仍未完成时，返回 409 {@code IDEMPOTENCY_IN_PROGRESS}。
+     * handler 抛出的业务异常（限下方捕获集）先转成 envelope，再作为 {@code Outcome} 存储。
      */
     private ResponseEntity<String> idempotent(HttpServletRequest req, long userId, String endpointKey,
                                               String bodyJson,
@@ -231,25 +252,21 @@ public class ApiV1Controller {
         String key = req.getHeader("Idempotency-Key");
         if (key == null || key.isBlank()) return handler.get();
         String hash = ApiSupport.sha256(req.getMethod() + " " + req.getRequestURI() + "\n" + bodyJson);
-        Map<String, Object> found = idem.find(userId, endpointKey, key);
-        if (found != null) {
-            if (hash.equals(found.get("request_hash"))) {
-                int status = ((Number) found.get("http_status")).intValue();
-                return support.raw(String.valueOf(found.get("response_body")), status);
+        IdempotencyService.Result result = idem.execute(userId, endpointKey, key, hash, () -> {
+            ResponseEntity<String> resp;
+            try {
+                resp = handler.get();
+            } catch (ConflictException | IllegalStateException | EmptyResultDataAccessException
+                     | RateLimitException | UnauthorizedException e) {
+                resp = errorResponse(e);
             }
-            return support.json(support.error("IDEMPOTENCY_CONFLICT", "同一幂等键对应了不同请求", null),
-                    HttpStatus.CONFLICT);
-        }
-        ResponseEntity<String> resp;
-        try {
-            resp = handler.get();
-        } catch (ConflictException | IllegalStateException | EmptyResultDataAccessException
-                 | RateLimitException e) {
-            resp = errorResponse(e);
-        }
-        idem.save(userId, endpointKey, key, hash,
-                resp.getBody() == null ? "" : resp.getBody(), resp.getStatusCode().value());
-        return resp;
+            return new IdempotencyService.Outcome(resp.getStatusCode().value(),
+                    resp.getBody() == null ? "" : resp.getBody());
+        });
+        return switch (result.kind()) {
+            case EXECUTED, REPLAY, CONFLICT, IN_PROGRESS ->
+                    support.raw(result.responseBody(), result.httpStatus());
+        };
     }
 
     private static boolean flag(Map<String, Object> body, String key) {
@@ -257,6 +274,14 @@ public class ApiV1Controller {
         Object v = body.get(key);
         if (v instanceof Boolean b) return b;
         return v != null && "true".equalsIgnoreCase(v.toString());
+    }
+
+    // 确认字段省略或为 null 时，不等同于显式传 false。
+    private static Boolean nullableBool(Map<String, Object> body, String key) {
+        Object v = body == null ? null : body.get(key);
+        if (v == null) return null;
+        if (v instanceof Boolean b) return b;
+        return Boolean.parseBoolean(v.toString());
     }
 
     // ---- 阶段四 CEM-09：治理返回体的 ID 字符串化 / body 取值小工具 ----
@@ -316,6 +341,29 @@ public class ApiV1Controller {
 
     private static Long num(Map<String, Object> body, String key) {
         return body == null ? null : longOf(body.get(key));
+    }
+
+    private static List<Long> evidenceIdsOf(Map<String, Object> body) {
+        Object value = body == null ? null : body.get("evidenceIds");
+        if (value == null) return null;
+        if (!(value instanceof List<?> list)) {
+            throw new ValidationException("evidenceIds", "证据格式不正确");
+        }
+        List<Long> ids = new ArrayList<>(list.size());
+        for (Object item : list) {
+            if (item instanceof String s) {
+                try {
+                    ids.add(Long.parseLong(s.trim()));
+                } catch (NumberFormatException e) {
+                    throw new ValidationException("evidenceIds", "证据格式不正确");
+                }
+            } else if (item instanceof Number n) {
+                ids.add(n.longValue());
+            } else {
+                throw new ValidationException("evidenceIds", "证据格式不正确");
+            }
+        }
+        return ids;
     }
 
     private static Integer intVal(Map<String, Object> body, String key) {
@@ -404,7 +452,7 @@ public class ApiV1Controller {
 
     /**
      * POST /api/v1/uploads/image（multipart/form-data，字段名 file）。
-     * 须登录（未登录返回真正的 401，不走 require() 的 400 口径）。
+     * 须登录（未登录返回 HTTP 401，错误码为 UNAUTHORIZED）。
      * 只按文件头嗅探 JPEG / PNG / GIF / WebP，上限 5MB；UUID 命名落盘，
      * 返回 /uploads/&lt;文件名&gt; 供活动 cover_url 引用。上传不可回放，不包 idempotent()。
      */
@@ -444,13 +492,13 @@ public class ApiV1Controller {
 
     // ---- 账号 ----
 
-    @PostMapping("/login")
+    @PostMapping({"/login", "/auth/login"})
     public ResponseEntity<String> login(@RequestBody Map<String, String> body) {
         String token = auth.login(body.get("account"), body.get("password"));
         if (token == null) throw new IllegalStateException("账号或密码错误");
         Long id = auth.userId("Bearer " + token);
         // 阶段四 CEM-09：登录响应附带治理状态（管理员标记 / 是否处于封禁）。
-        Map<String, Object> user = new LinkedHashMap<>(auth.me(id));
+        Map<String, Object> user = new LinkedHashMap<>(auth.meForLogin(id));
         user.put("is_admin", governance.isAdmin(id));
         user.put("banned", governance.activeBan(id) != null);
         Map<String, Object> data = new LinkedHashMap<>();
@@ -459,7 +507,15 @@ public class ApiV1Controller {
         return support.json(support.ok(data), HttpStatus.OK);
     }
 
-    @PostMapping("/register")
+    /** A1 序号1：服务端登出，只撤销 Authorization 中的当前令牌。 */
+    @PostMapping("/auth/logout")
+    public ResponseEntity<String> logout(
+            @RequestHeader(value = "Authorization", required = false) String h) {
+        auth.logout(h);
+        return support.json(support.ok(Map.of()), HttpStatus.OK);
+    }
+
+    @PostMapping({"/register", "/auth/register"})
     public ResponseEntity<String> register(@RequestBody Map<String, String> body) {
         String account = body.get("account"), password = body.get("password");
         // 2026-11-18 批次1 F3：长度校验之外还要排除全空白——"    " 能过 4 位长度检查，
@@ -523,17 +579,23 @@ public class ApiV1Controller {
         });
     }
 
-    // 阶段一 A5：资料修改（当前仅昵称）。字段错误返回 VALIDATION + fieldErrors.nickname。
+    // 阶段一 A5：资料修改；A2a 序号2 增加联系方式。字段错误返回 VALIDATION + fieldErrors。
     @PatchMapping("/me/profile")
     public ResponseEntity<String> updateProfile(@RequestBody(required = false) Map<String, Object> body,
             @RequestHeader(value = "Authorization", required = false) String h,
             HttpServletRequest req) {
         long me = require(h);
+        // 只提交 contact 时保留原昵称；显式提交的字段才参与校验与更新。
+        boolean nicknameProvided = body != null && body.containsKey("nickname");
         String nickname = body != null && body.get("nickname") instanceof String
                 ? (String) body.get("nickname") : null;
+        boolean contactProvided = body != null && body.containsKey("contact");
+        String contact = body != null && body.get("contact") instanceof String
+                ? (String) body.get("contact") : null;
         return idempotent(req, me, "PATCH /api/v1/me/profile",
                 support.toJson(body == null ? Map.of() : body), () ->
-                        support.json(support.ok(Map.of("user", auth.updateNickname(me, nickname))), HttpStatus.OK));
+                        support.json(support.ok(Map.of("user", auth.updateProfile(
+                                me, nicknameProvided, nickname, contactProvided, contact))), HttpStatus.OK));
     }
 
     // 阶段三 CEM-10：本人信用查询（当前分 + 流水分页，仅本人可见）。
@@ -567,40 +629,81 @@ public class ApiV1Controller {
             } catch (Exception e) { me = null; }
         }
         // 任务 9（2026-11-10）：大厅默认不列已取消活动；/my 与 /my/organized 不动。
+        String fromWhere = "FROM activity a JOIN app_user u ON u.id=a.organizer_id WHERE 1=1 AND a.status <> 'CANCELLED' " +
+                // 阶段四 CEM-09：治理下架的活动不在大厅展示（/my 与 /my/organized 仍可见）。
+                "AND NOT EXISTS (SELECT 1 FROM activity_delist d WHERE d.activity_id=a.id AND d.delisted=1) ";
+        List<Object> args = new ArrayList<>();
+        // A5 序号6：q 按字面匹配；用非反斜线 ESCAPE 字符，先转义 escape 本身再转义 % 和 _，
+        // PG/MySQL 语义一致，反斜线保持字面（非默认 escape 时两个库都不再特殊解释）。
+        if (q != null && !q.isBlank()) {
+            String literal = q.trim().replace("!", "!!").replace("%", "!%").replace("_", "!_");
+            fromWhere += "AND a.title LIKE ? ESCAPE '!' ";
+            args.add("%" + literal + "%");
+        }
+        // A5 序号7：category 仅接受封闭集；空或「全部」不筛，其余 400 + fieldErrors.category。
+        if (category != null && !category.isBlank() && !"全部".equals(category)) {
+            if (!Set.of("羽毛球", "桌游", "学习组", "其他").contains(category))
+                throw new ValidationException("category", "类别不合法");
+            fromWhere += "AND a.category = ? "; args.add(category);
+        }
+        int[] pp = ApiSupport.pagination(page, pageSize);
+        long offset = (long) (pp[0] - 1) * pp[1];
+        Object[] filterArgs = args.toArray();
+        long total = jdbc.queryForObject("SELECT COUNT(*) " + fromWhere, Long.class, filterArgs);
         String sql = "SELECT a.*, u.nickname AS organizer_name, " +
                 "(SELECT COUNT(*) FROM participation p WHERE p.activity_id=a.id AND p.status='FORMAL') AS formal_count, " +
                 "(SELECT COUNT(*) FROM participation p WHERE p.activity_id=a.id AND p.status='WAITING') AS waiting_count, " +
                 "(SELECT COUNT(*) FROM invitation i JOIN participation p ON p.id=i.participation_id " +
                 " WHERE p.activity_id=a.id AND i.status='PENDING' AND i.expires_at > now()) AS reserved_count " +
-                "FROM activity a JOIN app_user u ON u.id=a.organizer_id WHERE 1=1 AND a.status <> 'CANCELLED' " +
-                // 阶段四 CEM-09：治理下架的活动不在大厅展示（/my 与 /my/organized 仍可见）。
-                "AND NOT EXISTS (SELECT 1 FROM activity_delist d WHERE d.activity_id=a.id AND d.delisted=1) ";
-        List<Object> args = new ArrayList<>();
-        if (q != null && !q.isBlank()) { sql += "AND a.title LIKE ? "; args.add("%" + q.trim() + "%"); }
-        if (category != null && !category.isBlank() && !"全部".equals(category)) {
-            sql += "AND a.category = ? "; args.add(category);
-        }
-        sql += "ORDER BY a.start_time, a.id";
-        var rows = jdbc.queryForList(sql, args.toArray());
-        if (me != null) {
+                fromWhere + "ORDER BY a.start_time, a.id LIMIT " + pp[1] + " OFFSET " + offset;
+        var rows = jdbc.queryForList(sql, filterArgs);
+        if (me != null && !rows.isEmpty()) {
+            List<Object> statusArgs = new ArrayList<>(rows.size() + 1);
+            statusArgs.add(me);
             for (var row : rows) {
-                var mine = jdbc.queryForList(
-                        "SELECT status FROM participation WHERE activity_id=? AND user_id=?",
-                        row.get("id"), me);
-                row.put("my_status", mine.isEmpty() ? null : mine.get(0).get("status"));
+                statusArgs.add(longOf(row.get("id")));
+            }
+            String placeholders = String.join(",", Collections.nCopies(rows.size(), "?"));
+            Map<Long, Object> myStatuses = new HashMap<>();
+            for (var mine : jdbc.queryForList(
+                    "SELECT activity_id, status FROM participation WHERE user_id=? AND activity_id IN (" + placeholders + ")",
+                    statusArgs.toArray())) {
+                myStatuses.put(longOf(mine.get("activity_id")), mine.get("status"));
+            }
+            for (var row : rows) {
+                row.put("my_status", myStatuses.getOrDefault(longOf(row.get("id")), null));
             }
         }
-        int[] pp = ApiSupport.pagination(page, pageSize);
-        return support.json(support.ok(ApiSupport.page(rows, pp[0], pp[1])), HttpStatus.OK);
+        Map<String, Object> data = new LinkedHashMap<>();
+        data.put("items", rows);
+        data.put("page", pp[0]);
+        data.put("pageSize", pp[1]);
+        data.put("size", pp[1]);
+        data.put("total", total);
+        return support.json(support.ok(data), HttpStatus.OK);
     }
 
     @GetMapping("/activities/{id}")
     public ResponseEntity<String> activityDetail(@PathVariable long id,
             @RequestParam(required = false) Integer rosterPage,
             @RequestParam(required = false) Integer rosterPageSize,
+            @RequestParam(name = "rosterConfirmedPage", required = false) Integer rosterConfirmedPage,
+            @RequestParam(name = "rosterConfirmedPageSize", required = false) Integer rosterConfirmedPageSize,
+            @RequestParam(name = "rosterPendingPage", required = false) Integer rosterPendingPage,
+            @RequestParam(name = "rosterPendingPageSize", required = false) Integer rosterPendingPageSize,
+            @RequestParam(name = "rosterWaitingPage", required = false) Integer rosterWaitingPage,
+            @RequestParam(name = "rosterWaitingPageSize", required = false) Integer rosterWaitingPageSize,
             @RequestHeader(value = "Authorization", required = false) String h) {
         Long me = auth.userId(h);
-        Map<String, Object> out = buddy.activityDetail(id, me);
+        // A12 序号8：令牌解析出 userId 后核对账号状态；非 ACTIVE 或账号不存在按访客处理，
+        // 不返回本人状态 / 名单；无 token 的公开详情不受影响。
+        if (me != null) {
+            try {
+                if (!"ACTIVE".equals(auth.me(me).get("status"))) me = null;
+            } catch (Exception e) { me = null; }
+        }
+        Map<String, Object> out = buddy.activityDetail(id, me, rosterConfirmedPage, rosterConfirmedPageSize,
+                rosterPendingPage, rosterPendingPageSize, rosterWaitingPage, rosterWaitingPageSize);
         // 阶段四 CEM-09：下架活动仅组织者与管理员可见；其余人按不存在处理。
         boolean delisted = governance.isDelisted(id);
         out.put("delisted", delisted);
@@ -610,7 +713,7 @@ public class ApiV1Controller {
             if (me == null || (!isOrganizer && !governance.isAdmin(me)))
                 throw new IllegalStateException("活动已下架");
         }
-        // 组织者名单单独分页（rosterPage/rosterPageSize，默认 1/20），其余字段不变。
+        // 组织者名单单独分页（rosterPage/rosterPageSize，默认 1/10），其余字段不变。
         Object roster = out.get("roster");
         if (roster instanceof List<?> list) {
             int[] pp = ApiSupport.pagination(rosterPage, rosterPageSize);
@@ -728,8 +831,15 @@ public class ApiV1Controller {
                 errors.put("location", "地点需为 1-100 字");
             Integer capacity = null;
             Object capRaw = body.get("capacity");
-            if (capRaw instanceof Number) capacity = ((Number) capRaw).intValue();
-            else if (capRaw instanceof String) {
+            if (capRaw instanceof Number n) {
+                // A6 序号10：只接受严格整数；小数与超出 int 范围一律 400，禁止 intValue() 截断。
+                try {
+                    java.math.BigDecimal decimal = new java.math.BigDecimal(n.toString());
+                    if (decimal.stripTrailingZeros().scale() <= 0)
+                        capacity = decimal.intValueExact();
+                } catch (ArithmeticException | NumberFormatException ignored) { capacity = null; }
+            } else if (capRaw instanceof String) {
+                // 字符串仍按原口径解析；Integer.parseInt 本身拒绝小数与越界值。
                 try { capacity = Integer.parseInt(((String) capRaw).trim()); } catch (NumberFormatException ignored) { }
             }
             if (capacity == null || capacity < 1 || capacity > 100)
@@ -804,19 +914,40 @@ public class ApiV1Controller {
                 return ps;
             }, keyHolder);
             Long id = keyHolder.getKey().longValue();
-            return support.json(support.ok(Map.of("id", id)), HttpStatus.OK);
+            // DG-BE-06：创建也落一条整活动级变更日志（field 为空）。
+            jdbc.update("INSERT INTO activity_change_log(activity_id, actor_id, change_type, field, old_value, new_value, reason, created_at) " +
+                    "VALUES (?,?, 'CREATE', NULL, NULL, NULL, NULL, ?)", id, me, Timestamp.valueOf(LocalDateTime.now()));
+            // A6 序号10：加法返回 activity_version（新行 updated_at），渲染口径与
+            // BuddyService.versionOf 一致；旧字段 id 保留。
+            Object updatedAt = jdbc.queryForObject(
+                    "SELECT updated_at FROM activity WHERE id=?", Object.class, id);
+            return support.json(support.ok(Map.of("id", id,
+                    "activity_version", versionOf(updatedAt))), HttpStatus.OK);
         });
+    }
+
+    /** A6：版本令牌渲染，逐类型归一与 BuddyService.versionOf/asLocalDateTime 相同。 */
+    private static String versionOf(Object updatedAt) {
+        if (updatedAt instanceof LocalDateTime ldt) return ldt.toString();
+        if (updatedAt instanceof Timestamp ts) return ts.toLocalDateTime().toString();
+        if (updatedAt instanceof java.util.Date d)
+            return new Timestamp(d.getTime()).toLocalDateTime().toString();
+        throw new IllegalStateException("无法识别的时间类型: " + updatedAt);
     }
 
     @PostMapping("/activities/{id}/cancel")
     public ResponseEntity<String> cancel(@PathVariable long id,
+            @RequestBody(required = false) Map<String, Object> body,
             @RequestHeader(value = "Authorization", required = false) String h,
             HttpServletRequest req) {
         // 任务 1（2026-11-09）：取消逻辑与取消通知都在 BuddyService.cancelActivity
         // 内完成（SDD §6.8：取消通知所有受影响成员）；二次取消幂等，不重发通知。
         long me = require(h);
-        return idempotent(req, me, "POST /api/v1/activities/{id}/cancel", "{}",
-                () -> support.json(support.ok(buddy.cancelActivity(id, me)), HttpStatus.OK));
+        String bodyJson = support.toJson(body == null ? Map.of() : body);
+        String reason = Objects.toString(body == null ? null : body.get("reason"), null);
+        Boolean confirmed = nullableBool(body, "confirmed");
+        return idempotent(req, me, "POST /api/v1/activities/{id}/cancel", bodyJson,
+                () -> support.json(support.ok(buddy.cancelActivity(id, me, reason, confirmed)), HttpStatus.OK));
     }
 
     // 任务 2（2026-11-09）：组织者报名截止前改活动时间（开始 / 结束 / 截止三项）。
@@ -841,6 +972,33 @@ public class ApiV1Controller {
         });
     }
 
+    @PatchMapping("/activities/{id}/edit")
+    public ResponseEntity<String> patchActivityEdit(@PathVariable long id,
+            @RequestBody(required = false) Map<String, Object> body,
+            @RequestHeader(value = "Authorization", required = false) String h,
+            HttpServletRequest req) {
+        return editActivity(id, body, h, req, "PATCH /api/v1/activities/{id}/edit");
+    }
+
+    @PostMapping("/activities/{id}/edit")
+    public ResponseEntity<String> postActivityEdit(@PathVariable long id,
+            @RequestBody(required = false) Map<String, Object> body,
+            @RequestHeader(value = "Authorization", required = false) String h,
+            HttpServletRequest req) {
+        return editActivity(id, body, h, req, "POST /api/v1/activities/{id}/edit");
+    }
+
+    private ResponseEntity<String> editActivity(long id, Map<String, Object> body, String h,
+                                                HttpServletRequest req, String endpointKey) {
+        long me = require(h);
+        // 幂等摘要包含随后单独传给服务的 expectedVersion。
+        String bodyJson = support.toJson(body == null ? Map.of() : body);
+        Map<String, Object> fields = new LinkedHashMap<>(body == null ? Map.of() : body);
+        String expectedVersion = Objects.toString(fields.remove("expectedVersion"), null);
+        return idempotent(req, me, endpointKey, bodyJson,
+                () -> support.json(support.ok(buddy.editActivity(me, id, fields, expectedVersion)), HttpStatus.OK));
+    }
+
     // 2026-11-17：组织者改封面 / 清除回默认。body.cover_url（兼容 coverUrl）为空串
     // 或 null 表示清除。与 reschedule 同一组织者口径；写接口走幂等包装。
     @PutMapping("/activities/{id}/cover")
@@ -851,19 +1009,34 @@ public class ApiV1Controller {
         long me = require(h);
         String bodyJson = support.toJson(body == null ? Map.of() : body);
         return idempotent(req, me, "PUT /api/v1/activities/{id}/cover", bodyJson, () -> {
-            var act = jdbc.queryForMap("SELECT organizer_id FROM activity WHERE id=?", id);
+            var act = jdbc.queryForMap("SELECT organizer_id, cover_url FROM activity WHERE id=?", id);
             long organizerId = ((Number) act.get("organizer_id")).longValue();
             if (organizerId != me)
                 throw new IllegalStateException("只有组织者可以修改封面");
             String coverUrl = validateCoverUrl(coverUrlOf(body));
             jdbc.update("UPDATE activity SET cover_url=?, updated_at=? WHERE id=?",
                     coverUrl, Timestamp.valueOf(LocalDateTime.now()), id);
+            jdbc.update("INSERT INTO activity_change_log(activity_id, actor_id, change_type, field, old_value, new_value, reason, created_at) " +
+                    "VALUES (?,?, 'COVER', 'cover_url', ?, ?, NULL, ?)",
+                    id, me, act.get("cover_url"), coverUrl, Timestamp.valueOf(LocalDateTime.now()));
             // Map.of 不接受 null value，清除时 cover_url 为 null，改用 LinkedHashMap。
             Map<String, Object> data = new LinkedHashMap<>();
             data.put("id", id);
             data.put("cover_url", coverUrl);
             return support.json(support.ok(data), HttpStatus.OK);
         });
+    }
+
+    // DG-BE-06：活动变更日志（组织者本人 + 管理员可见，服务层校验并抛 403；分页口径同其他列表）。
+    @GetMapping("/activities/{id}/changes")
+    public ResponseEntity<String> activityChanges(@PathVariable long id,
+            @RequestParam(required = false) Integer page,
+            @RequestParam(required = false) Integer pageSize,
+            @RequestHeader(value = "Authorization", required = false) String h) {
+        long me = require(h);
+        var rows = buddy.listActivityChanges(id, me, governance.isAdmin(me));
+        int[] pp = ApiSupport.pagination(page, pageSize);
+        return support.json(support.ok(ApiSupport.page(rows, pp[0], pp[1])), HttpStatus.OK);
     }
 
     // 任务 9（2026-11-09）：站内留言——详情页「给组织者留言」，登录用户报名前后均可。
@@ -924,31 +1097,40 @@ public class ApiV1Controller {
             HttpServletRequest req) {
         long me = require(h);
         boolean confirm = flag(body, "confirmConflict");
+        boolean conditionsConfirmed = flag(body, "conditions_confirmed");
         String bodyJson = support.toJson(body == null ? Map.of() : body);
         return idempotent(req, me, "POST /api/v1/activities/{id}/signup", bodyJson, () -> {
             // 阶段四 CEM-09：下架活动不可报名（大厅已隐藏，直连详情页也拦住）。
             if (governance.isDelisted(id)) throw new IllegalStateException("活动已下架，无法报名");
-            return support.json(support.ok(buddy.signup(id, me, confirm)), HttpStatus.OK);
+            return support.json(support.ok(buddy.signup(id, me, confirm, conditionsConfirmed)), HttpStatus.OK);
         });
     }
 
     @PostMapping("/participations/{id}/withdraw")
     public ResponseEntity<String> withdraw(@PathVariable long id,
+            @RequestBody(required = false) Map<String, Object> body,
             @RequestHeader(value = "Authorization", required = false) String h,
             HttpServletRequest req) {
         long me = require(h);
-        return idempotent(req, me, "POST /api/v1/participations/{id}/withdraw", "{}",
-                () -> support.json(support.ok(buddy.withdraw(id, me)), HttpStatus.OK));
+        String bodyJson = support.toJson(body == null ? Map.of() : body);
+        Boolean confirmed = nullableBool(body, "confirmed");
+        String version = Objects.toString(body == null ? null : body.get("version"), null);
+        return idempotent(req, me, "POST /api/v1/participations/{id}/withdraw", bodyJson,
+                () -> support.json(support.ok(buddy.withdraw(id, me, confirmed, version)), HttpStatus.OK));
     }
 
     // 阶段一 A7：放弃候补（与正式退出分开）。
     @PostMapping("/participations/{id}/abandon")
     public ResponseEntity<String> abandon(@PathVariable long id,
+            @RequestBody(required = false) Map<String, Object> body,
             @RequestHeader(value = "Authorization", required = false) String h,
             HttpServletRequest req) {
         long me = require(h);
-        return idempotent(req, me, "POST /api/v1/participations/{id}/abandon", "{}",
-                () -> support.json(support.ok(buddy.abandon(id, me)), HttpStatus.OK));
+        String bodyJson = support.toJson(body == null ? Map.of() : body);
+        Boolean confirmed = nullableBool(body, "confirmed");
+        String version = Objects.toString(body == null ? null : body.get("version"), null);
+        return idempotent(req, me, "POST /api/v1/participations/{id}/abandon", bodyJson,
+                () -> support.json(support.ok(buddy.abandon(id, me, confirmed, version)), HttpStatus.OK));
     }
 
     // 阶段一 A1：参与事件流，本人或活动组织者可见。
@@ -967,8 +1149,10 @@ public class ApiV1Controller {
         long me = require(h);
         boolean confirm = flag(body, "confirmConflict");
         String bodyJson = support.toJson(body == null ? Map.of() : body);
-        return idempotent(req, me, "POST /api/v1/invitations/{id}/accept", bodyJson,
-                () -> support.json(support.ok(buddy.respondInvitation(id, me, true, confirm)), HttpStatus.OK));
+        return idempotent(req, me, "POST /api/v1/invitations/{id}/accept", bodyJson, () -> {
+            var result = buddy.respondInvitation(id, me, true, confirm);
+            return respondResult(result);
+        });
     }
 
     @PostMapping("/invitations/{id}/reject")
@@ -976,8 +1160,24 @@ public class ApiV1Controller {
             @RequestHeader(value = "Authorization", required = false) String h,
             HttpServletRequest req) {
         long me = require(h);
-        return idempotent(req, me, "POST /api/v1/invitations/{id}/reject", "{}",
-                () -> support.json(support.ok(buddy.respondInvitation(id, me, false, false)), HttpStatus.OK));
+        return idempotent(req, me, "POST /api/v1/invitations/{id}/reject", "{}", () -> {
+            var result = buddy.respondInvitation(id, me, false, false);
+            return respondResult(result);
+        });
+    }
+
+    private ResponseEntity<String> respondResult(Map<String, Object> result) {
+        if (!Boolean.TRUE.equals(result.get("_respond_error"))) {
+            return support.json(support.ok(result), HttpStatus.OK);
+        }
+        Map<String, Object> state = new LinkedHashMap<>(result);
+        state.remove("code");
+        state.remove("message");
+        state.keySet().removeIf(key -> key != null && key.startsWith("_"));
+        String code = Objects.toString(result.get("code"), "");
+        String message = Objects.toString(result.get("message"), "");
+        return support.json(support.error(code.isBlank() ? "ERROR" : code,
+                message.isBlank() ? "邀请已失效" : message, state), HttpStatus.BAD_REQUEST);
     }
 
     // ---- 我的活动 / 通知 ----
@@ -985,18 +1185,91 @@ public class ApiV1Controller {
     @GetMapping("/my")
     public ResponseEntity<String> my(@RequestParam(required = false) Integer page,
             @RequestParam(required = false) Integer pageSize,
+            @RequestParam(required = false) String type,
+            @RequestParam(required = false) Integer size,
             @RequestHeader(value = "Authorization", required = false) String h) {
         long me = require(h);
+        LocalDateTime now = LocalDateTime.now();
         var rows = jdbc.queryForList(
                 "SELECT p.*, a.title, a.location, a.capacity, a.start_time, a.deadline, " +
+                "a.end_time, a.status AS activity_status, " +
                 // 阶段四 CEM-09：下架活动仍在“我的活动”中展示，附带标记供前端提示。
                 "(SELECT COALESCE(d.delisted,0) FROM activity_delist d WHERE d.activity_id=a.id) AS delisted, " +
                 "(SELECT i.id FROM invitation i WHERE i.participation_id=p.id AND i.status='PENDING' ORDER BY i.id DESC LIMIT 1) AS invitation_id, " +
                 "(SELECT i.expires_at FROM invitation i WHERE i.participation_id=p.id AND i.status='PENDING' ORDER BY i.id DESC LIMIT 1) AS invitation_expires_at " +
                 "FROM participation p JOIN activity a ON a.id=p.activity_id WHERE p.user_id=? " +
                 "ORDER BY p.updated_at DESC, p.id DESC", me);
-        int[] pp = ApiSupport.pagination(page, pageSize);
-        return support.json(support.ok(ApiSupport.page(rows, pp[0], pp[1])), HttpStatus.OK);
+        String filter = type == null ? "" : type.trim().toUpperCase(Locale.ROOT);
+        if (Set.of("FORMAL", "WAITING", "HISTORY").contains(filter)) {
+            rows = rows.stream().filter(row -> {
+                Object status = row.get("status");
+                boolean formal = "FORMAL".equals(status);
+                boolean ended = "ENDED".equals(row.get("activity_status"));
+                boolean waitlisted = "WAITING".equals(status) || "INVITED".equals(status);
+                LocalDateTime deadline = toLdt(row.get("deadline"));
+                return switch (filter) {
+                    case "FORMAL" -> formal && !ended;
+                    case "WAITING" -> waitlisted && deadline != null && now.isBefore(deadline);
+                    case "HISTORY" -> "WITHDRAWN".equals(status) || "EXPIRED".equals(status)
+                            || "CANCELLED".equals(status) || (formal && ended)
+                            || (waitlisted && deadline != null && !now.isBefore(deadline));
+                    default -> true;
+                };
+            }).toList();
+        }
+        int[] pp = ApiSupport.pagination(page, size != null ? size : pageSize);
+        Map<String, Object> data = ApiSupport.page(rows, pp[0], pp[1]);
+        // ApiSupport.page 切片保留 JdbcTemplate 返回的行 Map，仅补充本页行。
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> items = (List<Map<String, Object>>) data.get("items");
+        for (var row : items) {
+            Object status = row.get("status");
+            LocalDateTime deadline = toLdt(row.get("deadline"));
+            boolean beforeDeadline = deadline != null && now.isBefore(deadline);
+            if ("WAITING".equals(status)) {
+                if (beforeDeadline) {
+                    var queue = jdbc.queryForList(
+                            "SELECT id FROM participation WHERE activity_id=? AND status='WAITING' ORDER BY queued_at, id",
+                            row.get("activity_id"));
+                    Long participationId = longOf(row.get("id"));
+                    for (int i = 0; i < queue.size(); i++) {
+                        if (participationId != null && participationId.equals(longOf(queue.get(i).get("id")))) {
+                            row.put("my_rank", i + 1);
+                            break;
+                        }
+                    }
+                } else if (deadline != null) {
+                    row.put("my_rank", null);
+                    row.put("result_note", "报名已截止，未获得名额");
+                }
+            } else if ("INVITED".equals(status)) {
+                LocalDateTime expiresAt = toLdt(row.get("invitation_expires_at"));
+                if (!beforeDeadline || row.get("invitation_id") == null || expiresAt == null
+                        || !expiresAt.isAfter(now)) {
+                    row.put("invitation_id", null);
+                    row.put("invitation_expires_at", null);
+                }
+            } else if ("EXPIRED".equals(status)) {
+                // G14：截止收尾落库后，默认卡片仍按该参与行最近一次 SIGNUP_CLOSED 的
+                // 原因展示业务结果（找不到原因时才用默认文案）。
+                var details = jdbc.queryForList(
+                        "SELECT detail FROM participation_events " +
+                                "WHERE participation_id=? AND event_type='SIGNUP_CLOSED' " +
+                                "ORDER BY id DESC LIMIT 1",
+                        String.class, row.get("id"));
+                String detail = details.isEmpty() ? null : details.get(0);
+                row.put("result_note", detail == null || detail.isBlank()
+                        ? "报名已截止，未获得名额" : detail);
+            }
+        }
+        return support.json(support.ok(data), HttpStatus.OK);
+    }
+
+    private static LocalDateTime toLdt(Object value) {
+        if (value instanceof LocalDateTime ldt) return ldt;
+        if (value instanceof Timestamp ts) return ts.toLocalDateTime();
+        if (value instanceof java.util.Date d) return new Timestamp(d.getTime()).toLocalDateTime();
+        return null;
     }
 
     // 任务 2：我组织的活动（带正式/候补/预留人数）。新接口，不改 /api/my 的返回形状
@@ -1022,14 +1295,26 @@ public class ApiV1Controller {
     @GetMapping("/notifications")
     public ResponseEntity<String> notifications(@RequestParam(required = false) Integer page,
             @RequestParam(required = false) Integer pageSize,
+            @RequestParam(required = false) String unread,
             @RequestHeader(value = "Authorization", required = false) String h) {
         long me = require(h);
+        String unreadFilter = unread == null ? "" : unread.trim();
+        boolean unreadOnly = "1".equals(unreadFilter) || "true".equalsIgnoreCase(unreadFilter);
         // 任务 4 配合（2026-11-10）：邀请通知附加 expires_at（LEFT JOIN invitation），
         // 前端倒计时优先用该字段，解析通知文案为兜底；非邀请类通知该字段为 null。
         // 阶段一：只返回已发布通知（outbox），data 额外保留 unread 字段。
-        var all = buddy.listNotifications(me);
+        var all = buddy.listNotifications(me, unreadOnly);
         int[] pp = ApiSupport.pagination(page, pageSize);
         Map<String, Object> data = ApiSupport.page(all, pp[0], pp[1]);
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> items = (List<Map<String, Object>>) data.get("items");
+        for (var row : items) {
+            Object invitationId = row.get("invitation_id");
+            if (row.get("invitation_status") == null && invitationId != null) {
+                var statuses = jdbc.queryForList("SELECT status FROM invitation WHERE id=?", String.class, invitationId);
+                row.put("invitation_status", statuses.isEmpty() ? null : statuses.get(0));
+            }
+        }
         data.put("unread", buddy.unreadCount(me));
         return support.json(support.ok(data), HttpStatus.OK);
     }
@@ -1066,7 +1351,7 @@ public class ApiV1Controller {
         return idempotent(req, me, "POST /api/v1/complaints", bodyJson, () ->
                 support.json(support.ok(strIds(governance.fileComplaint(me,
                         num(body, "activity_id"), num(body, "subject_user_id"),
-                        str(body, "category"), str(body, "reason")), GOVERNANCE_ID_KEYS)), HttpStatus.OK));
+                        str(body, "category"), str(body, "reason"), evidenceIdsOf(body)), GOVERNANCE_ID_KEYS)), HttpStatus.OK));
     }
 
     @GetMapping("/complaints/mine")
@@ -1100,7 +1385,7 @@ public class ApiV1Controller {
         return idempotent(req, me, "POST /api/v1/appeals", bodyJson, () ->
                 support.json(support.ok(strIds(governance.fileAppeal(me,
                         num(body, "attendance_id"), num(body, "decision_id"),
-                        num(body, "complaint_id"), str(body, "reason")), GOVERNANCE_ID_KEYS)), HttpStatus.OK));
+                        num(body, "complaint_id"), str(body, "reason"), evidenceIdsOf(body)), GOVERNANCE_ID_KEYS)), HttpStatus.OK));
     }
 
     @GetMapping("/appeals/mine")
@@ -1132,7 +1417,7 @@ public class ApiV1Controller {
         return idempotent(req, 0L, "POST /api/v1/recovery", bodyJson, () ->
                 support.json(support.ok(strIds(governance.submitRecovery(
                         str(body, "account"), intVal(body, "request_type"),
-                        str(body, "reason"), str(body, "contact")), GOVERNANCE_ID_KEYS)), HttpStatus.OK));
+                        str(body, "reason"), str(body, "contact"), evidenceIdsOf(body)), GOVERNANCE_ID_KEYS)), HttpStatus.OK));
     }
 
     @GetMapping("/recovery/{id}")
@@ -1380,6 +1665,19 @@ public class ApiV1Controller {
                 governance.listActions(500), page, pageSize)), HttpStatus.OK);
     }
 
+    // DG-ADM-02：治理事项处理期限延期登记（服务层 GovernanceService.extendDeadline 已落地）。
+    @PostMapping("/admin/deadline-extensions")
+    public ResponseEntity<String> extendDeadline(@RequestBody(required = false) Map<String, Object> body,
+            @RequestHeader(value = "Authorization", required = false) String h,
+            HttpServletRequest req) {
+        long me = requireAdmin(h);
+        String bodyJson = support.toJson(body == null ? Map.of() : body);
+        return idempotent(req, me, "POST /api/v1/admin/deadline-extensions", bodyJson, () ->
+                support.json(support.ok(strIds(governance.extendDeadline(me,
+                        str(body, "kind"), requiredLong(body, "target_id"),
+                        str(body, "reason"), intVal(body, "extend_workdays")), GOVERNANCE_ID_KEYS)), HttpStatus.OK));
+    }
+
     // ---- 演示重置（仅演示用）：清空业务数据并恢复种子 ----
     // 修复前：无需任何登录即可调用，且不清空内存会话。序列重启后新注册用户
     // 会复用旧用户的 id，旧 token 不经任何校验就能冒用新用户（已复现）。
@@ -1410,6 +1708,7 @@ public class ApiV1Controller {
         jdbc.update("DELETE FROM checkin");
         jdbc.update("DELETE FROM checkin_attempt");
         jdbc.update("DELETE FROM participation_events");
+        jdbc.update("DELETE FROM activity_change_log");
         jdbc.update("DELETE FROM command_receipts");
         jdbc.update("DELETE FROM feedback");
         jdbc.update("DELETE FROM notification");
@@ -1427,6 +1726,7 @@ public class ApiV1Controller {
             jdbc.execute("ALTER TABLE invitation AUTO_INCREMENT = 1");
             jdbc.execute("ALTER TABLE notification AUTO_INCREMENT = 1");
             jdbc.execute("ALTER TABLE participation_events AUTO_INCREMENT = 1");
+            jdbc.execute("ALTER TABLE activity_change_log AUTO_INCREMENT = 1");
             jdbc.execute("ALTER TABLE command_receipts AUTO_INCREMENT = 1");
             jdbc.execute("ALTER TABLE evaluation AUTO_INCREMENT = 1");
             jdbc.execute("ALTER TABLE attendance_revision AUTO_INCREMENT = 1");
@@ -1450,6 +1750,7 @@ public class ApiV1Controller {
             jdbc.execute("ALTER SEQUENCE invitation_id_seq RESTART WITH 1");
             jdbc.execute("ALTER SEQUENCE notification_id_seq RESTART WITH 1");
             jdbc.execute("ALTER SEQUENCE participation_events_id_seq RESTART WITH 1");
+            jdbc.execute("ALTER SEQUENCE activity_change_log_id_seq RESTART WITH 1");
             jdbc.execute("ALTER SEQUENCE command_receipts_id_seq RESTART WITH 1");
             jdbc.execute("ALTER SEQUENCE evaluation_id_seq RESTART WITH 1");
             jdbc.execute("ALTER SEQUENCE attendance_revision_id_seq RESTART WITH 1");

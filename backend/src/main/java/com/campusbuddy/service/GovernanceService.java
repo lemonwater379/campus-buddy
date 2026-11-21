@@ -2,11 +2,14 @@ package com.campusbuddy.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.support.GeneratedKeyHolder;
 import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.interceptor.TransactionAspectSupport;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -15,6 +18,8 @@ import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.DayOfWeek;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.*;
 
@@ -237,20 +242,30 @@ public class GovernanceService {
 
     private long insertAppeal(long applicantId, long decisionId, Long complaintId,
                               String reason, LocalDateTime now) {
-        KeyHolder keyHolder = new GeneratedKeyHolder();
-        jdbc.update(con -> {
-            PreparedStatement ps = con.prepareStatement(
-                    "INSERT INTO appeal(applicant_id, decision_id, complaint_id, reason, state, " +
-                            "submitted_at) VALUES (?,?,?,?, 'PENDING', ?)",
-                    new String[]{"id"});
-            ps.setLong(1, applicantId);
-            ps.setLong(2, decisionId);
-            setLongOrNull(ps, 3, complaintId);
-            ps.setString(4, reason);
-            ps.setTimestamp(5, ts(now));
-            return ps;
-        }, keyHolder);
-        return keyHolder.getKey().longValue();
+        // PostgreSQL 约束冲突后须先回滚保存点，调用方才能在同一事务中只读回查。
+        var transaction = TransactionAspectSupport.currentTransactionStatus();
+        Object savepoint = transaction.createSavepoint();
+        try {
+            KeyHolder keyHolder = new GeneratedKeyHolder();
+            jdbc.update(con -> {
+                PreparedStatement ps = con.prepareStatement(
+                        "INSERT INTO appeal(applicant_id, decision_id, complaint_id, reason, state, " +
+                                "submitted_at) VALUES (?,?,?,?, 'PENDING', ?)",
+                        new String[]{"id"});
+                ps.setLong(1, applicantId);
+                ps.setLong(2, decisionId);
+                setLongOrNull(ps, 3, complaintId);
+                ps.setString(4, reason);
+                ps.setTimestamp(5, ts(now));
+                return ps;
+            }, keyHolder);
+            return keyHolder.getKey().longValue();
+        } catch (DataIntegrityViolationException e) {
+            transaction.rollbackToSavepoint(savepoint);
+            throw e;
+        } finally {
+            transaction.releaseSavepoint(savepoint);
+        }
     }
 
     private long insertRecoveryRequest(long applicantId, int requestType, Long decisionId,
@@ -322,9 +337,10 @@ public class GovernanceService {
         return out;
     }
 
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public Map<String, Object> appointAdmin(long actorId, long targetUserId, String note) {
         requireAdmin(actorId);
+        jdbc.queryForList("SELECT id FROM app_user WHERE id=? FOR UPDATE", targetUserId);
         if (count("SELECT COUNT(*) FROM app_user WHERE id=?", targetUserId) == 0)
             throw new IllegalStateException("用户不存在");
         String authorizationNote = note == null ? "" : note;
@@ -349,9 +365,10 @@ public class GovernanceService {
         return out;
     }
 
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public Map<String, Object> revokeAdmin(long actorId, long targetUserId, String reason) {
         requireAdmin(actorId);
+        jdbc.queryForList("SELECT id FROM app_user WHERE id=? FOR UPDATE", targetUserId);
         var rows = jdbc.queryForList(
                 "SELECT enabled FROM administrator WHERE user_id=?", targetUserId);
         if (rows.isEmpty() || !bool(rows.get(0).get("enabled")))
@@ -371,7 +388,221 @@ public class GovernanceService {
         return count("SELECT COUNT(*) FROM administrator WHERE enabled=1");
     }
 
-    // ---- 总览与队列（工作台） ----
+    // ---- DG-ADM-02 治理时限（工作日口径：周一至周五，节假日不建模） ----
+
+    /** 向后数工作日，保留时分秒；零工作日不调整，即使起点落在周末。 */
+    private static LocalDateTime addWorkdays(LocalDateTime start, int workdays) {
+        if (workdays == 0) return start;
+        LocalDate d = start.toLocalDate();
+        int added = 0;
+        while (added < workdays) {
+            d = d.plusDays(1);
+            DayOfWeek day = d.getDayOfWeek();
+            if (day != DayOfWeek.SATURDAY && day != DayOfWeek.SUNDAY) added++;
+        }
+        return LocalDateTime.of(d, start.toLocalTime());
+    }
+
+    private Integer extendWorkdaysOf(Object detailRaw) {
+        if (!(detailRaw instanceof String detail)) return null;
+        try {
+            var node = mapper.readTree(detail).path("extend_workdays");
+            return node.isIntegralNumber() && node.canConvertToInt() ? node.intValue() : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 逐条累加延期记录；跳过无法解析的明细。 */
+    private int totalExtendWorkdays(String targetType, long targetId) {
+        var rows = jdbc.queryForList(
+                "SELECT detail FROM governance_action " +
+                        "WHERE action='DEADLINE_EXTEND' AND target_type=? AND target_id=?",
+                targetType, targetId);
+        int total = 0;
+        for (var row : rows) {
+            Integer n = extendWorkdaysOf(row.get("detail"));
+            if (n != null) total += n;
+        }
+        return total;
+    }
+
+    /** 在响应 Map 上追加受理/处理期限、延期累计与逾期标记；submittedRaw 为空时不加字段。 */
+    private void putDeadline(Map<String, Object> m, String targetType, long targetId,
+                             Object submittedRaw, boolean open) {
+        if (submittedRaw == null) return;
+        LocalDateTime submitted = asLocalDateTime(submittedRaw);
+        int ext = totalExtendWorkdays(targetType, targetId);
+        LocalDateTime handleDeadline = addWorkdays(submitted, 5 + ext);
+        m.put("accept_deadline_at", iso(addWorkdays(submitted, 2)));
+        m.put("handle_deadline_at", iso(handleDeadline));
+        m.put("extended_workdays", ext);
+        // 逾期口径：仍未结案且当前时间已过（延期后）处理期限；不自动催办。
+        m.put("overdue", open && LocalDateTime.now().isAfter(handleDeadline));
+    }
+
+    /** 延期留痕列表（详情页展示）。 */
+    private List<Map<String, Object>> extensionRecords(String targetType, long targetId) {
+        var rows = jdbc.queryForList(
+                "SELECT id, actor_id, reason, detail, created_at FROM governance_action " +
+                        "WHERE action='DEADLINE_EXTEND' AND target_type=? AND target_id=? ORDER BY id",
+                targetType, targetId);
+        List<Map<String, Object>> out = new ArrayList<>(rows.size());
+        for (var row : rows) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", row.get("id"));
+            m.put("actor_id", row.get("actor_id"));
+            m.put("reason", row.get("reason"));
+            m.put("extend_workdays", extendWorkdaysOf(row.get("detail")));
+            m.put("created_at", iso(row.get("created_at")));
+            out.add(m);
+        }
+        return out;
+    }
+
+    /**
+     * 逾期计数：逐行按 putDeadline 同口径判断（状态列为 PENDING、处理期限=提交时间+5+累计延期工作日）。
+     * table / 列名均来自本类内部常量式调用，不含外部输入，故直接拼接。
+     */
+    private int countOverdue(String table, String timeCol, String stateCol, String targetType) {
+        var rows = jdbc.queryForList(
+                "SELECT id, " + timeCol + " AS submitted FROM " + table + " WHERE " + stateCol + "='PENDING'");
+        LocalDateTime now = LocalDateTime.now();
+        int n = 0;
+        for (var row : rows) {
+            Object raw = row.get("submitted");
+            if (raw == null) continue;
+            long id = ((Number) row.get("id")).longValue();
+            LocalDateTime submitted = asLocalDateTime(raw);
+            // 单条延期留痕已按 target 过滤，不会与其他事项的延期串联。
+            if (now.isAfter(addWorkdays(submitted, 5 + totalExtendWorkdays(targetType, id)))) n++;
+        }
+        return n;
+    }
+
+    /** 封禁到期复核逾期计数：封禁未解除、已过期且已过复核期限（到期后 1 个工作日）。 */
+    private int countBanReviewOverdue(LocalDateTime now) {
+        var rows = jdbc.queryForList(
+                "SELECT expires_at FROM user_ban WHERE lifted_at IS NULL AND expires_at IS NOT NULL");
+        int n = 0;
+        for (var row : rows) {
+            LocalDateTime expiresAt = asLocalDateTime(row.get("expires_at"));
+            if (now.isAfter(expiresAt) && now.isAfter(addWorkdays(expiresAt, 1))) n++;
+        }
+        return n;
+    }
+
+    /** 与 logAction 同表同列，额外返回新行 id（延期通知的 event_key 后缀）。 */
+    private long insertActionReturningId(long actorId, String action, String targetType,
+                                         long targetId, Long decisionId, String reason,
+                                         String detail) {
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbc.update(con -> {
+            PreparedStatement ps = con.prepareStatement(
+                    "INSERT INTO governance_action(actor_id, action, target_type, target_id, " +
+                            "decision_id, reason, detail, request_id, created_at) VALUES (?,?,?,?,?,?,?,NULL,?)",
+                    new String[]{"id"});
+            ps.setLong(1, actorId);
+            ps.setString(2, action);
+            ps.setString(3, targetType);
+            ps.setLong(4, targetId);
+            setLongOrNull(ps, 5, decisionId);
+            ps.setString(6, reason);
+            ps.setString(7, detail);
+            ps.setTimestamp(8, ts(LocalDateTime.now()));
+            return ps;
+        }, keyHolder);
+        return keyHolder.getKey().longValue();
+    }
+
+    /**
+     * 延期登记（DG-ADM-02）：仅未结事项可延期，只延长处理时限（5 个工作日 + 累计延期）。
+     * HTTP 端点由统筹另行排期，本方法只落服务层。
+     */
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public Map<String, Object> extendDeadline(long adminId, String kind, long targetId,
+                                              String reason, Integer extendWorkdays) {
+        requireAdmin(adminId);
+        if (kind == null || !Set.of("COMPLAINT", "APPEAL", "RECOVERY", "CREDIT_REVIEW").contains(kind))
+            throw new ValidationException("kind", "事项类型不合法");
+        if (extendWorkdays == null || extendWorkdays < 1 || extendWorkdays > 30)
+            throw new ValidationException("extend_workdays", "延长工作日须为 1 至 30");
+        requireText(reason, 500, "reason", "延期原因须为 1-500 字");
+
+        Long applicantId;
+        Object submittedRaw;
+        Long activityId;
+        Long decisionId;
+        String state;
+        switch (kind) {
+            case "COMPLAINT" -> {
+                var rows = jdbc.queryForList("SELECT * FROM complaint WHERE id=? FOR UPDATE", targetId);
+                if (rows.isEmpty()) throw new IllegalStateException("事项不存在");
+                var row = rows.get(0);
+                state = (String) row.get("state");
+                applicantId = ((Number) row.get("applicant_id")).longValue();
+                submittedRaw = row.get("submitted_at");
+                activityId = nullableLong(row.get("activity_id"));
+                decisionId = nullableLong(row.get("decision_id"));
+            }
+            case "APPEAL" -> {
+                var rows = jdbc.queryForList("SELECT * FROM appeal WHERE id=? FOR UPDATE", targetId);
+                if (rows.isEmpty()) throw new IllegalStateException("事项不存在");
+                var row = rows.get(0);
+                state = (String) row.get("state");
+                applicantId = ((Number) row.get("applicant_id")).longValue();
+                submittedRaw = row.get("submitted_at");
+                decisionId = ((Number) row.get("decision_id")).longValue();
+                // 申诉本身不带 activity_id，经原决定取所属活动。
+                var decisions = jdbc.queryForList(
+                        "SELECT activity_id FROM governance_decision WHERE id=?", decisionId);
+                activityId = decisions.isEmpty() ? null : nullableLong(decisions.get(0).get("activity_id"));
+            }
+            case "RECOVERY" -> {
+                var rows = jdbc.queryForList(
+                        "SELECT * FROM recovery_request WHERE id=? FOR UPDATE", targetId);
+                if (rows.isEmpty()) throw new IllegalStateException("事项不存在");
+                var row = rows.get(0);
+                state = (String) row.get("state");
+                applicantId = ((Number) row.get("applicant_id")).longValue();
+                submittedRaw = row.get("applied_at");
+                activityId = null;
+                decisionId = nullableLong(row.get("decision_id"));
+            }
+            default -> {
+                var rows = jdbc.queryForList(
+                        "SELECT * FROM credit_review WHERE id=? FOR UPDATE", targetId);
+                if (rows.isEmpty()) throw new IllegalStateException("事项不存在");
+                var row = rows.get(0);
+                state = (String) row.get("status");
+                applicantId = ((Number) row.get("user_id")).longValue();
+                submittedRaw = row.get("created_at");
+                activityId = null;
+                decisionId = null;
+            }
+        }
+        if (!"PENDING".equals(state))
+            throw new IllegalStateException("该事项已结案，不能延期");
+
+        long actionId = insertActionReturningId(adminId, "DEADLINE_EXTEND", kind, targetId,
+                decisionId, reason, json(Map.of("extend_workdays", extendWorkdays)));
+        notify(applicantId, activityId,
+                "你提交的事项处理期限已延期 " + extendWorkdays + " 个工作日。原因：" + reason,
+                "notify:deadline-extend:" + kind + ":" + targetId + ":" + actionId);
+
+        LocalDateTime submitted = asLocalDateTime(submittedRaw);
+        int totalExt = totalExtendWorkdays(kind, targetId);
+        LocalDateTime handleDeadline = addWorkdays(submitted, 5 + totalExt);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("kind", kind);
+        out.put("target_id", targetId);
+        out.put("extend_workdays", extendWorkdays);
+        out.put("total_extended_workdays", totalExt);
+        out.put("accept_deadline_at", iso(addWorkdays(submitted, 2)));
+        out.put("handle_deadline_at", iso(handleDeadline));
+        out.put("overdue", LocalDateTime.now().isAfter(handleDeadline));
+        return out;
+    }
 
     public Map<String, Object> overview() {
         LocalDateTime now = LocalDateTime.now();
@@ -384,6 +615,17 @@ public class GovernanceService {
                 "SELECT COUNT(*) FROM user_ban WHERE lifted_at IS NULL AND expires_at > ?", ts(now)));
         out.put("bans_expired_pending", count(
                 "SELECT COUNT(*) FROM user_ban WHERE lifted_at IS NULL AND expires_at <= ?", ts(now)));
+        // DG-ADM-02：逾期未结案计数（工作台待办）。
+        int complaintsOverdue = countOverdue("complaint", "submitted_at", "state", "COMPLAINT");
+        int appealsOverdue = countOverdue("appeal", "submitted_at", "state", "APPEAL");
+        int recoveryOverdue = countOverdue("recovery_request", "applied_at", "state", "RECOVERY");
+        int creditOverdue = countOverdue("credit_review", "created_at", "status", "CREDIT_REVIEW");
+        out.put("complaints_overdue", complaintsOverdue);
+        out.put("appeals_overdue", appealsOverdue);
+        out.put("recovery_overdue", recoveryOverdue);
+        out.put("credit_reviews_overdue", creditOverdue);
+        out.put("overdue_total", complaintsOverdue + appealsOverdue + recoveryOverdue + creditOverdue);
+        out.put("bans_review_overdue", countBanReviewOverdue(now));
         return out;
     }
 
@@ -474,6 +716,21 @@ public class GovernanceService {
         return out;
     }
 
+    // ---- 组织者本人出勤代核（DG-ADM-01，SDD §6.9） ----
+
+    /** 管理员代核组织者本人出勤：外层事务保证出勤变更与治理审计同提交 / 同回滚。 */
+    @Transactional
+    public Map<String, Object> correctOrganizerAttendance(long adminId, long activityId,
+                                                          String result, String evidence) {
+        requireAdmin(adminId);
+        Map<String, Object> out = attendanceService.adminVerifyOrganizer(
+                activityId, adminId, result, evidence);
+        // logAction 签名的 decision_id / detail 传 null：本操作只追加审计，不生成治理决定。
+        logAction(adminId, "ATTENDANCE_ORGANIZER_VERIFY", "ACTIVITY", activityId,
+                null, evidence, null);
+        return out;
+    }
+
     // ---- 封禁 ----
 
     private boolean isBanned(long userId) {
@@ -558,7 +815,7 @@ public class GovernanceService {
         return out;
     }
 
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public Map<String, Object> banUser(long actorId, long targetUserId, Integer days,
                                        String reason, String futureFormal, String organized) {
         requireAdmin(actorId);
@@ -580,6 +837,13 @@ public class GovernanceService {
         if (!Set.of("CANCEL", "KEEP").contains(organizedMode))
             throw new ValidationException("organized", "organized 须为 CANCEL 或 KEEP");
 
+        var lockedUser = jdbc.queryForList("SELECT id FROM app_user WHERE id=? FOR UPDATE", targetUserId);
+        // 等锁期间封禁及管理员状态可能已变，锁下重查，避免重复处置。
+        if (lockedUser.isEmpty()) throw new IllegalStateException("用户不存在");
+        if (isBanned(targetUserId))
+            throw new IllegalStateException("该用户已被封禁");
+        if (isAdmin(targetUserId) && enabledAdminCount() <= 1)
+            throw new IllegalStateException("不得封禁唯一管理员");
         LocalDateTime now = LocalDateTime.now();
         LocalDateTime expiresAt = now.plusDays(days);
         String nickname = jdbc.queryForObject(
@@ -618,8 +882,12 @@ public class GovernanceService {
             long aid = ((Number) p.get("activity_id")).longValue();
             String title = (String) p.get("title");
             try {
-                jdbc.update("UPDATE participation SET status='WITHDRAWN', updated_at=? WHERE id=?",
-                        ts(now), pid);
+                int changed = jdbc.update("UPDATE participation SET status='WITHDRAWN', updated_at=? " +
+                                "WHERE id=? AND status='WAITING'", ts(now), pid);
+                if (changed == 0) {
+                    execution.add(execItem("WAITING", pid, aid, "WITHDRAW", "SKIPPED", "参与状态已变更"));
+                    continue;
+                }
                 logParticipationEvent(pid, aid, targetUserId, "BAN_DISPOSAL",
                         "WAITING", "WITHDRAWN", reason);
                 notify(targetUserId, aid,
@@ -637,8 +905,12 @@ public class GovernanceService {
             try {
                 jdbc.update("UPDATE invitation SET status='INVALID', responded_at=? " +
                                 "WHERE participation_id=? AND status='PENDING'", ts(now), pid);
-                jdbc.update("UPDATE participation SET status='WITHDRAWN', updated_at=? WHERE id=?",
-                        ts(now), pid);
+                int changed = jdbc.update("UPDATE participation SET status='WITHDRAWN', updated_at=? " +
+                                "WHERE id=? AND status='INVITED'", ts(now), pid);
+                if (changed == 0) {
+                    execution.add(execItem("INVITED", pid, aid, "INVALIDATE", "SKIPPED", "参与状态已变更"));
+                    continue;
+                }
                 logParticipationEvent(pid, aid, targetUserId, "BAN_DISPOSAL",
                         "INVITED", "WITHDRAWN", reason);
                 notify(targetUserId, aid,
@@ -656,8 +928,13 @@ public class GovernanceService {
                 long organizerId = ((Number) p.get("organizer_id")).longValue();
                 String title = (String) p.get("title");
                 try {
-                    jdbc.update("UPDATE participation SET status='WITHDRAWN', updated_at=? WHERE id=?",
-                            ts(now), pid);
+                    int changed = jdbc.update("UPDATE participation SET status='WITHDRAWN', updated_at=? " +
+                                    "WHERE id=? AND status='FORMAL'", ts(now), pid);
+                    if (changed == 0) {
+                        execution.add(execItem("FUTURE_FORMAL", pid, aid,
+                                "WITHDRAW", "SKIPPED", "参与状态已变更"));
+                        continue;
+                    }
                     logParticipationEvent(pid, aid, targetUserId, "BAN_DISPOSAL",
                             "FORMAL", "WITHDRAWN", reason);
                     notify(targetUserId, aid,
@@ -691,7 +968,7 @@ public class GovernanceService {
             for (var row : organizedRows) {
                 long aid = ((Number) row.get("activity_id")).longValue();
                 try {
-                    buddy.cancelActivity(aid, targetUserId);
+                    buddy.cancelActivity(aid, targetUserId, reason, Boolean.TRUE);
                     execution.add(execItem("ORGANIZED_ACTIVE", null, aid, "CANCEL", "DONE", null));
                 } catch (Exception e) {
                     execution.add(execItem("ORGANIZED_ACTIVE", null, aid,
@@ -728,9 +1005,11 @@ public class GovernanceService {
     @Transactional
     public Map<String, Object> unbanUser(long actorId, long targetUserId, String reason) {
         requireAdmin(actorId);
+        // 与 banUser 同序，先锁用户再锁当前封禁记录。
+        jdbc.queryForList("SELECT id FROM app_user WHERE id=? FOR UPDATE", targetUserId);
         var bans = jdbc.queryForList(
-                "SELECT * FROM user_ban WHERE user_id=? AND lifted_at IS NULL ORDER BY banned_at DESC LIMIT 1",
-                targetUserId);
+                "SELECT * FROM user_ban WHERE user_id=? AND lifted_at IS NULL " +
+                        "ORDER BY banned_at DESC LIMIT 1 FOR UPDATE", targetUserId);
         if (bans.isEmpty()) throw new IllegalStateException("该用户未被封禁");
         long banDecisionId = ((Number) bans.get(0).get("decision_id")).longValue();
         LocalDateTime now = LocalDateTime.now();
@@ -771,8 +1050,13 @@ public class GovernanceService {
             m.put("expires_at", iso(row.get("expires_at")));
             LocalDateTime expiresAt = row.get("expires_at") == null
                     ? null : asLocalDateTime(row.get("expires_at"));
-            m.put("expired", expiresAt != null && !expiresAt.isAfter(now));
+            boolean expired = expiresAt != null && !expiresAt.isAfter(now);
+            m.put("expired", expired);
             m.put("lifted_at", iso(row.get("lifted_at")));
+            LocalDateTime reviewDeadline = expired && row.get("lifted_at") == null
+                    ? addWorkdays(expiresAt, 1) : null;
+            m.put("review_deadline_at", iso(reviewDeadline));
+            m.put("overdue", reviewDeadline != null && now.isAfter(reviewDeadline));
             out.add(m);
         }
         return out;
@@ -810,11 +1094,23 @@ public class GovernanceService {
         requireAdmin(actorId);
         requireText(reason, 500, "reason", "下架理由须为 1-500 字");
         var actRows = jdbc.queryForList(
-                "SELECT status, organizer_id FROM activity WHERE id=?", activityId);
+                "SELECT status, organizer_id, title FROM activity WHERE id=?", activityId);
         if (actRows.isEmpty()) throw new IllegalStateException("活动不存在");
         if (isDelisted(activityId)) throw new IllegalStateException("活动已下架");
         String status = (String) actRows.get(0).get("status");
+        String title = (String) actRows.get(0).get("title");
         long organizerId = ((Number) actRows.get(0).get("organizer_id")).longValue();
+        var participationRows = jdbc.queryForList(
+                "SELECT user_id, status FROM participation WHERE activity_id=? " +
+                        "AND status IN ('FORMAL','WAITING','INVITED') ORDER BY id", activityId);
+        var participantStatuses = new LinkedHashMap<Long, String>();
+        for (var row : participationRows) {
+            long userId = ((Number) row.get("user_id")).longValue();
+            participantStatuses.putIfAbsent(userId, (String) row.get("status"));
+        }
+        if (!participantStatuses.containsKey(organizerId)) {
+            participantStatuses.put(organizerId, null);
+        }
         long decisionId = insertDecision(actorId, null, "DELIST", null, activityId,
                 null, null, reason, "下架", null, null, null, null);
         LocalDateTime now = LocalDateTime.now();
@@ -823,19 +1119,35 @@ public class GovernanceService {
                             "updated_by=?, updated_at=? WHERE activity_id=?",
                     decisionId, reason, actorId, ts(now), activityId);
         } else {
-            jdbc.update("INSERT INTO activity_delist(activity_id, delisted, decision_id, reason, " +
-                            "updated_by, created_at, updated_at) VALUES (?,1,?,?,?,?,?)",
-                    activityId, decisionId, reason, actorId, ts(now), ts(now));
+            try {
+                jdbc.update("INSERT INTO activity_delist(activity_id, delisted, decision_id, reason, " +
+                                "updated_by, created_at, updated_at) VALUES (?,1,?,?,?,?,?)",
+                        activityId, decisionId, reason, actorId, ts(now), ts(now));
+            } catch (DataIntegrityViolationException e) {
+                int changed = jdbc.update("UPDATE activity_delist SET delisted=1, decision_id=?, reason=?, " +
+                                "updated_by=?, updated_at=? WHERE activity_id=?",
+                        decisionId, reason, actorId, ts(now), activityId);
+                if (changed == 0) throw e;
+            }
         }
         boolean cancelFailed = false;
         String note = null;
         if (!"ENDED".equals(status) && !"CANCELLED".equals(status)) {
             try {
-                buddy.cancelActivity(activityId, organizerId);
+                buddy.cancelActivity(activityId, organizerId, reason, Boolean.TRUE);
             } catch (Exception e) {
                 cancelFailed = true;
                 note = "活动取消失败：" + e.getMessage();
             }
+        }
+        for (var entry : participantStatuses.entrySet()) {
+            Long userId = entry.getKey();
+            String content = "活动「" + title + "」已被平台下架。下架理由：" + reason + "。";
+            if ("INVITED".equals(entry.getValue())) {
+                content += "原邀请作废。";
+            }
+            notify(userId, Long.valueOf(activityId), content,
+                    "notify:delist:" + decisionId + ":" + userId);
         }
         String activityStatus = jdbc.queryForObject(
                 "SELECT status FROM activity WHERE id=?", String.class, activityId);
@@ -855,6 +1167,9 @@ public class GovernanceService {
     @Transactional
     public Map<String, Object> relistActivity(long actorId, long activityId, String reason) {
         requireAdmin(actorId);
+        // J5-P2（2026-11-21）：reason 缺失/空白先回 400 VALIDATION，避免 null 写入 activity_delist.reason（NOT NULL）回 500。
+        if (reason == null || reason.isBlank())
+            throw new ValidationException("reason", "恢复上架原因不能为空");
         if (!isDelisted(activityId)) throw new IllegalStateException("活动未下架");
         LocalDateTime now = LocalDateTime.now();
         long decisionId = insertDecision(actorId, null, "RELIST", null, activityId,
@@ -862,6 +1177,17 @@ public class GovernanceService {
         jdbc.update("UPDATE activity_delist SET delisted=0, decision_id=?, reason=?, updated_by=?, " +
                         "updated_at=? WHERE activity_id=?",
                 decisionId, reason, actorId, ts(now), activityId);
+        // 未结束活动下架时已按取消收尾（status=CANCELLED），relist 在同一事务内还原报名态；
+        // 已结束（now >= end_time）或非 CANCELLED 状态不动。
+        var actRows = jdbc.queryForList(
+                "SELECT status, end_time FROM activity WHERE id=?", activityId);
+        if (!actRows.isEmpty()) {
+            var act = actRows.get(0);
+            if ("CANCELLED".equals(act.get("status"))
+                    && now.isBefore(asLocalDateTime(act.get("end_time")))) {
+                jdbc.update("UPDATE activity SET status='OPEN' WHERE id=?", activityId);
+            }
+        }
         logAction(actorId, "RELIST_ACTIVITY", "ACTIVITY", activityId, decisionId, reason, null);
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("decision_id", decisionId);
@@ -889,17 +1215,93 @@ public class GovernanceService {
         m.put("state", row.get("state"));
         m.put("submitted_at", iso(row.get("submitted_at")));
         m.put("handled_at", iso(row.get("handled_at")));
+        putDeadline(m, "COMPLAINT", ((Number) row.get("id")).longValue(), row.get("submitted_at"),
+                "PENDING".equals(row.get("state")));
+        m.put("evidence", evidenceList("complaint_id", ((Number) row.get("id")).longValue()));
+        m.put("extensions", extensionRecords("COMPLAINT", ((Number) row.get("id")).longValue()));
         return m;
     }
 
     private Map<String, Object> complaintRow(long complaintId) {
         var rows = jdbc.queryForList(COMPLAINT_SELECT + " WHERE c.id=?", complaintId);
-        return rows.isEmpty() ? null : complaintMap(rows.get(0));
+        if (rows.isEmpty()) return null;
+        Map<String, Object> m = complaintMap(rows.get(0));
+        m.put("extensions", extensionRecords("COMPLAINT", complaintId));
+        return m;
+    }
+
+    // ---- DG-BE-07 证据绑定（SDD §6.12 / §7） ----
+
+    private static final Set<String> EVIDENCE_FK_COLUMNS =
+            Set.of("complaint_id", "appeal_id", "recovery_request_id");
+
+    private static String evidenceFkColumn(String fkColumn) {
+        if (!EVIDENCE_FK_COLUMNS.contains(fkColumn))
+            throw new IllegalStateException("非法证据归属列: " + fkColumn);
+        return fkColumn;
+    }
+
+    /**
+     * 同事务绑定暂存证据：逐个校验存在、属主为申请人、三外键全空、本案累计 ≤5 件；
+     * 任一不符抛 ValidationException 使整单回滚。fkColumn 只接受内部字面量（三值校验后拼 SQL）。
+     */
+    private void bindEvidence(long ownerId, List<Long> evidenceIds, String fkColumn, long caseId) {
+        if (evidenceIds == null || evidenceIds.isEmpty()) return;
+        String fk = evidenceFkColumn(fkColumn);
+        List<Long> ids = new ArrayList<>(new LinkedHashSet<>(evidenceIds));
+        if (ids.size() != evidenceIds.size() || ids.size() > 5)
+            throw new ValidationException("evidence_ids", "证据文件最多 5 件且不能重复");
+        Integer bound = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM evidence_file WHERE " + fk + "=?", Integer.class, caseId);
+        if ((bound == null ? 0 : bound) + ids.size() > 5)
+            throw new ValidationException("evidence_ids", "本案证据文件最多 5 件");
+        for (Long evidenceId : ids) {
+            if (evidenceId == null)
+                throw new ValidationException("evidence_ids", "证据文件不存在");
+            var rows = jdbc.queryForList(
+                    "SELECT * FROM evidence_file WHERE id=? FOR UPDATE", evidenceId);
+            if (rows.isEmpty())
+                throw new ValidationException("evidence_ids", "证据文件不存在");
+            var row = rows.get(0);
+            if (((Number) row.get("owner_id")).longValue() != ownerId)
+                throw new ValidationException("evidence_ids", "只能绑定本人上传的证据文件");
+            if (row.get("complaint_id") != null || row.get("appeal_id") != null
+                    || row.get("recovery_request_id") != null)
+                throw new ValidationException("evidence_ids", "证据文件已绑定其他案件");
+        }
+        for (Long evidenceId : ids) {
+            jdbc.update("UPDATE evidence_file SET " + fk + "=? WHERE id=?", caseId, evidenceId);
+        }
+    }
+
+    /** 案件证据元数据列表（绝不含 storage_key / sha256 / 文件路径）。 */
+    private List<Map<String, Object>> evidenceList(String fkColumn, long caseId) {
+        String fk = evidenceFkColumn(fkColumn);
+        var rows = jdbc.queryForList(
+                "SELECT id, original_name, mime_type, size_bytes FROM evidence_file WHERE "
+                        + fk + "=? ORDER BY id", caseId);
+        List<Map<String, Object>> out = new ArrayList<>(rows.size());
+        for (var row : rows) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("id", row.get("id"));
+            m.put("original_name", row.get("original_name"));
+            m.put("mime_type", row.get("mime_type"));
+            m.put("size_bytes", row.get("size_bytes"));
+            out.add(m);
+        }
+        return out;
     }
 
     @Transactional
     public Map<String, Object> fileComplaint(long applicantId, Long activityId,
                                              Long subjectUserId, String category, String reason) {
+        return fileComplaint(applicantId, activityId, subjectUserId, category, reason, null);
+    }
+
+    @Transactional
+    public Map<String, Object> fileComplaint(long applicantId, Long activityId,
+                                             Long subjectUserId, String category, String reason,
+                                             List<Long> evidenceIds) {
         if ((activityId == null) == (subjectUserId == null))
             throw new ValidationException("target", "请选择举报对象");
         if (category == null || !COMPLAINT_CATEGORIES.contains(category))
@@ -915,6 +1317,7 @@ public class GovernanceService {
         }
         long complaintId = insertComplaint(applicantId, activityId, subjectUserId,
                 category, reason, LocalDateTime.now());
+        bindEvidence(applicantId, evidenceIds, "complaint_id", complaintId);
         logAction(applicantId, "COMPLAINT_FILE", "COMPLAINT", complaintId, null, reason, null);
         return complaintRow(complaintId);
     }
@@ -951,7 +1354,7 @@ public class GovernanceService {
         if (outcome == null || !COMPLAINT_OUTCOMES.contains(outcome))
             throw new ValidationException("outcome", "处理结果不合法");
         requireText(resultText, 1000, "result", "处理结论须为 1-1000 字");
-        var rows = jdbc.queryForList("SELECT * FROM complaint WHERE id=?", complaintId);
+        var rows = jdbc.queryForList("SELECT * FROM complaint WHERE id=? FOR UPDATE", complaintId);
         if (rows.isEmpty()) throw new IllegalStateException("举报不存在");
         var complaint = rows.get(0);
         if (!"PENDING".equals(complaint.get("state")))
@@ -1034,28 +1437,49 @@ public class GovernanceService {
                 "SELECT * FROM governance_decision WHERE id=?", decisionId));
     }
 
-    private Map<String, Object> duplicateAppeal(long appealId) {
+    /** 未结申诉幂等返回：already 为新契约名，duplicate 保留旧名兼容。 */
+    private Map<String, Object> alreadyAppeal(long appealId) {
         Map<String, Object> row = getAppeal(appealId);
         if (row == null) row = new LinkedHashMap<>();
+        row.put("already", true);
         row.put("duplicate", true);
         return row;
     }
 
-    private Long appealIdByDecision(long decisionId) {
+    /** 只认未结申诉：已关闭申诉不再短路（PM 裁定：已关闭的按现行规则受理）。 */
+    private Long pendingAppealIdByDecision(long decisionId) {
         var rows = jdbc.queryForList(
-                "SELECT id FROM appeal WHERE decision_id=? ORDER BY id LIMIT 1", decisionId);
+                "SELECT id FROM appeal WHERE decision_id=? AND state='PENDING' ORDER BY id LIMIT 1",
+                decisionId);
         return rows.isEmpty() ? null : ((Number) rows.get(0).get("id")).longValue();
     }
 
-    private Long appealIdByComplaint(long complaintId) {
+    private Long pendingAppealIdByComplaint(long complaintId) {
         var rows = jdbc.queryForList(
-                "SELECT id FROM appeal WHERE complaint_id=? ORDER BY id LIMIT 1", complaintId);
+                "SELECT id FROM appeal WHERE complaint_id=? AND state='PENDING' ORDER BY id LIMIT 1",
+                complaintId);
         return rows.isEmpty() ? null : ((Number) rows.get(0).get("id")).longValue();
     }
 
-    @Transactional
+    /*
+     * S2（2026-11-21）：申诉唯一约束已改为「仅 PENDING 唯一」（PG 部分唯一索引 /
+     * MySQL 生成列唯一索引，见 schema 双份与 merge/work/server-ddl-s2-*.sql），
+     * 已结申诉不再阻止新申诉受理，原 A4 的 closedAppealConflict 报错分支已删除。
+     * 部署顺序依赖：存量库须先执行 server-ddl-s2 对应脚本再上新 jar（或同一窗口），
+     * 否则旧全状态唯一约束仍会拦截已结案后的新申诉插入（届时 catch 中回查无未结申诉、原样抛出）。
+     */
+
+    // 锁后回查须读取最新已提交的申诉，不能沿用 MySQL 的事务快照。
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public Map<String, Object> fileAppeal(long applicantId, Long attendanceId,
                                           Long decisionId, Long complaintId, String reason) {
+        return fileAppeal(applicantId, attendanceId, decisionId, complaintId, reason, null);
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public Map<String, Object> fileAppeal(long applicantId, Long attendanceId,
+                                          Long decisionId, Long complaintId, String reason,
+                                          List<Long> evidenceIds) {
         requireText(reason, 2000, "reason", "申诉理由须为 1-2000 字");
         LocalDateTime now = LocalDateTime.now();
         if (attendanceId != null) {
@@ -1080,15 +1504,28 @@ public class GovernanceService {
                 throw new IllegalStateException("申诉期已届满");
             Map<String, Object> decision = ensureAttendanceDecision(attendanceId);
             long targetDecisionId = ((Number) decision.get("id")).longValue();
-            Long existingId = appealIdByDecision(targetDecisionId);
-            if (existingId != null) return duplicateAppeal(existingId);
-            long appealId = insertAppeal(applicantId, targetDecisionId, null, reason, now);
+            // 直申也能命中同一决定；两条入口共用决定行锁。
+            jdbc.queryForList("SELECT id FROM governance_decision WHERE id=? FOR UPDATE", targetDecisionId);
+            Long existingId = pendingAppealIdByDecision(targetDecisionId);
+            if (existingId != null) return alreadyAppeal(existingId);
+            long appealId;
+            try {
+                appealId = insertAppeal(applicantId, targetDecisionId, null, reason, now);
+            } catch (DataIntegrityViolationException e) {
+                existingId = pendingAppealIdByDecision(targetDecisionId);
+                if (existingId != null) return alreadyAppeal(existingId);
+                throw e;
+            }
+            bindEvidence(applicantId, evidenceIds, "appeal_id", appealId);
             logAction(applicantId, "APPEAL_FILE", "APPEAL", appealId, targetDecisionId,
                     reason, null);
             return getAppeal(appealId);
         }
         if (complaintId != null) {
-            var rows = jdbc.queryForList("SELECT * FROM complaint WHERE id=?", complaintId);
+            // 决定锁先于举报锁，与复核追加决定、更新举报的顺序一致；锁下再核对关联。
+            if (decisionId != null)
+                jdbc.queryForList("SELECT id FROM governance_decision WHERE id=? FOR UPDATE", decisionId);
+            var rows = jdbc.queryForList("SELECT * FROM complaint WHERE id=? FOR UPDATE", complaintId);
             if (rows.isEmpty()) throw new IllegalStateException("举报不存在");
             var complaint = rows.get(0);
             if (((Number) complaint.get("applicant_id")).longValue() != applicantId)
@@ -1098,10 +1535,19 @@ public class GovernanceService {
                 throw new IllegalStateException("该举报尚未处理，不能申诉");
             if (decisionId == null || decisionId.longValue() != linkedDecisionId.longValue())
                 throw new IllegalStateException("处理决定不匹配");
-            Long existingId = appealIdByComplaint(complaintId);
-            if (existingId == null) existingId = appealIdByDecision(linkedDecisionId);
-            if (existingId != null) return duplicateAppeal(existingId);
-            long appealId = insertAppeal(applicantId, linkedDecisionId, complaintId, reason, now);
+            Long existingId = pendingAppealIdByComplaint(complaintId);
+            if (existingId == null) existingId = pendingAppealIdByDecision(linkedDecisionId);
+            if (existingId != null) return alreadyAppeal(existingId);
+            long appealId;
+            try {
+                appealId = insertAppeal(applicantId, linkedDecisionId, complaintId, reason, now);
+            } catch (DataIntegrityViolationException e) {
+                existingId = pendingAppealIdByComplaint(complaintId);
+                if (existingId == null) existingId = pendingAppealIdByDecision(linkedDecisionId);
+                if (existingId != null) return alreadyAppeal(existingId);
+                throw e;
+            }
+            bindEvidence(applicantId, evidenceIds, "appeal_id", appealId);
             logAction(applicantId, "APPEAL_FILE", "APPEAL", appealId, linkedDecisionId,
                     reason, null);
             return getAppeal(appealId);
@@ -1109,14 +1555,22 @@ public class GovernanceService {
         if (decisionId == null)
             throw new ValidationException("target", "请选择申诉对象");
         var rows = jdbc.queryForList(
-                "SELECT * FROM governance_decision WHERE id=?", decisionId);
+                "SELECT * FROM governance_decision WHERE id=? FOR UPDATE", decisionId);
         if (rows.isEmpty()) throw new IllegalStateException("决定不存在");
         Long subjectUserId = nullableLong(rows.get(0).get("subject_user_id"));
         if (subjectUserId == null || subjectUserId.longValue() != applicantId)
             throw new IllegalStateException("只能申诉本人的决定");
-        Long existingId = appealIdByDecision(decisionId);
-        if (existingId != null) return duplicateAppeal(existingId);
-        long appealId = insertAppeal(applicantId, decisionId, null, reason, now);
+        Long existingId = pendingAppealIdByDecision(decisionId);
+        if (existingId != null) return alreadyAppeal(existingId);
+        long appealId;
+        try {
+            appealId = insertAppeal(applicantId, decisionId, null, reason, now);
+        } catch (DataIntegrityViolationException e) {
+            existingId = pendingAppealIdByDecision(decisionId);
+            if (existingId != null) return alreadyAppeal(existingId);
+            throw e;
+        }
+        bindEvidence(applicantId, evidenceIds, "appeal_id", appealId);
         logAction(applicantId, "APPEAL_FILE", "APPEAL", appealId, decisionId, reason, null);
         return getAppeal(appealId);
     }
@@ -1139,6 +1593,10 @@ public class GovernanceService {
         m.put("attendance_id", row.get("attendance_id"));
         m.put("activity_id", row.get("activity_id"));
         m.put("subject_user_id", row.get("subject_user_id"));
+        putDeadline(m, "APPEAL", ((Number) row.get("id")).longValue(), row.get("submitted_at"),
+                "PENDING".equals(row.get("state")));
+        m.put("evidence", evidenceList("appeal_id", ((Number) row.get("id")).longValue()));
+        m.put("extensions", extensionRecords("APPEAL", ((Number) row.get("id")).longValue()));
         return m;
     }
 
@@ -1165,7 +1623,10 @@ public class GovernanceService {
 
     public Map<String, Object> getAppeal(long appealId) {
         var rows = jdbc.queryForList(APPEAL_SELECT + " WHERE ap.id=?", appealId);
-        return rows.isEmpty() ? null : appealMap(rows.get(0));
+        if (rows.isEmpty()) return null;
+        Map<String, Object> m = appealMap(rows.get(0));
+        m.put("extensions", extensionRecords("APPEAL", appealId));
+        return m;
     }
 
     @Transactional
@@ -1174,7 +1635,7 @@ public class GovernanceService {
         requireAdmin(reviewerId);
         if (outcome == null || !REVIEW_APPEAL_OUTCOMES.contains(outcome))
             throw new ValidationException("outcome", "复核结果不合法");
-        var appealRows = jdbc.queryForList("SELECT * FROM appeal WHERE id=?", appealId);
+        var appealRows = jdbc.queryForList("SELECT * FROM appeal WHERE id=? FOR UPDATE", appealId);
         if (appealRows.isEmpty()) throw new IllegalStateException("申诉不存在");
         var appeal = appealRows.get(0);
         if (!"PENDING".equals(appeal.get("state")))
@@ -1251,6 +1712,21 @@ public class GovernanceService {
                     newState, resultDecisionId, ts(now), complaint.get("id"));
             appealState = "OVERTURNED";
             notifyText = "你的申诉已复核：已撤销原处理。";
+        } else if ("REMOVAL".equals(decisionType)) {
+            // DG-BE-05 解除通道（2026-11-21）：撤销移出 → 写 MEMBER_REMOVAL_LIFTED 标记，
+            // BuddyService.checkRemovedRestriction 据最近关键事件判定，被移出者可重新报名。
+            // 复核人独立性护栏（复核人≠原处理人/申诉人）已在方法开头统一校验，与其他分支一致。
+            if (participationId == null || activityId == null || subjectUserId == null)
+                throw new IllegalStateException("移出决定缺少参与记录关联");
+            resultDecisionId = insertDecision(reviewerId, originalDecisionId, "REVIEW",
+                    subjectUserId, activityId, participationId, null,
+                    "申诉复核", text == null ? "撤销移出决定" : text,
+                    null, null, null, null);
+            logParticipationEvent(participationId, activityId, subjectUserId,
+                    "MEMBER_REMOVAL_LIFTED", "WITHDRAWN", "WITHDRAWN",
+                    "申诉复核撤销移出（appeal_id=" + appealId + "）");
+            appealState = "OVERTURNED";
+            notifyText = "你的申诉已复核：移出决定已撤销，可重新报名该活动。";
         } else {
             throw new IllegalStateException("该类决定暂不支持更正，请维持或走对应业务通道");
         }
@@ -1267,9 +1743,16 @@ public class GovernanceService {
 
     // ---- 找回 / 恢复 ----
 
-    @Transactional
+    @Transactional(isolation = Isolation.READ_COMMITTED)
     public Map<String, Object> submitRecovery(String account, Integer requestType,
                                               String reason, String contact) {
+        return submitRecovery(account, requestType, reason, contact, null);
+    }
+
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public Map<String, Object> submitRecovery(String account, Integer requestType,
+                                              String reason, String contact,
+                                              List<Long> evidenceIds) {
         if (account == null || account.isBlank())
             throw new ValidationException("account", "请填写账号");
         if (requestType == null || (requestType != 1 && requestType != 2))
@@ -1283,6 +1766,7 @@ public class GovernanceService {
         long applicantId = ((Number) userRows.get(0).get("id")).longValue();
         Long decisionId = null;
         if (requestType == 2) {
+            jdbc.queryForList("SELECT id FROM app_user WHERE id=? FOR UPDATE", applicantId);
             var banRows = jdbc.queryForList(
                     "SELECT decision_id FROM user_ban WHERE user_id=? AND lifted_at IS NULL " +
                             "ORDER BY banned_at DESC LIMIT 1", applicantId);
@@ -1320,6 +1804,7 @@ public class GovernanceService {
         String queryHash = sha256(queryToken);
         long requestId = insertRecoveryRequest(applicantId, requestType, decisionId, reason,
                 contact, queryHash, LocalDateTime.now());
+        bindEvidence(applicantId, evidenceIds, "recovery_request_id", requestId);
         logAction(applicantId, "RECOVERY_SUBMIT", "RECOVERY", requestId, decisionId, reason, null);
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("id", requestId);
@@ -1349,6 +1834,8 @@ public class GovernanceService {
         out.put("recovered_at", iso(row.get("recovered_at")));
         out.put("has_reset_credential", row.get("reset_hash") != null);
         out.put("reset_expires_at", iso(row.get("reset_expires_at")));
+        putDeadline(out, "RECOVERY", requestId, row.get("applied_at"),
+                "PENDING".equals(row.get("state")));
         return out;
     }
 
@@ -1379,6 +1866,9 @@ public class GovernanceService {
             m.put("applied_at", iso(row.get("applied_at")));
             m.put("reviewed_at", iso(row.get("reviewed_at")));
             m.put("recovered_at", iso(row.get("recovered_at")));
+            putDeadline(m, "RECOVERY", ((Number) row.get("id")).longValue(), row.get("applied_at"),
+                    "PENDING".equals(row.get("state")));
+            m.put("extensions", extensionRecords("RECOVERY", ((Number) row.get("id")).longValue()));
             out.add(m);
         }
         return out;
@@ -1391,7 +1881,7 @@ public class GovernanceService {
         if (outcome == null || !Set.of("APPROVE", "REJECT").contains(outcome))
             throw new ValidationException("outcome", "审核结果不合法");
         var rows = jdbc.queryForList(
-                "SELECT * FROM recovery_request WHERE id=?", requestId);
+                "SELECT * FROM recovery_request WHERE id=? FOR UPDATE", requestId);
         if (rows.isEmpty()) throw new IllegalStateException("申请不存在");
         var req = rows.get(0);
         if (!"PENDING".equals(req.get("state")))
@@ -1513,6 +2003,9 @@ public class GovernanceService {
         m.put("window_end", iso(row.get("window_end")));
         m.put("status", row.get("status"));
         m.put("created_at", iso(row.get("created_at")));
+        putDeadline(m, "CREDIT_REVIEW", ((Number) row.get("id")).longValue(), row.get("created_at"),
+                "PENDING".equals(row.get("status")));
+        m.put("extensions", extensionRecords("CREDIT_REVIEW", ((Number) row.get("id")).longValue()));
         return m;
     }
 
@@ -1538,7 +2031,7 @@ public class GovernanceService {
         requireAdmin(actorId);
         if (outcome == null || !Set.of("REVIEWED", "DISMISSED").contains(outcome))
             throw new ValidationException("outcome", "处理结果不合法");
-        var rows = jdbc.queryForList("SELECT status FROM credit_review WHERE id=?", reviewId);
+        var rows = jdbc.queryForList("SELECT status FROM credit_review WHERE id=? FOR UPDATE", reviewId);
         if (rows.isEmpty()) throw new IllegalStateException("审查记录不存在");
         if (!"PENDING".equals(rows.get(0).get("status")))
             throw new IllegalStateException("该审查记录已处理");

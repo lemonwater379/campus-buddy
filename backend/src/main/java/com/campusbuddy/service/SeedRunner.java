@@ -69,7 +69,7 @@ public class SeedRunner implements CommandLineRunner {
         long id;
         if (rows.isEmpty()) {
             jdbc.update("INSERT INTO app_user(account, password_hash, nickname) VALUES (?,?,?)",
-                    account, AuthService.hash("123456"), nickname);
+                    account, AuthService.hash("Dazi@2026!"), nickname);
             // 按账号查回，不用 SELECT MAX(id)（并发/序列推进时会串位）。
             id = userId(account);
         } else {
@@ -79,7 +79,7 @@ public class SeedRunner implements CommandLineRunner {
                 "SELECT COUNT(*) FROM administrator WHERE user_id=?", Integer.class, id);
         if (exists == null || exists == 0) {
             jdbc.update("INSERT INTO administrator(user_id, enabled, authorized_at, authorization_note) " +
-                            "VALUES (?, 1, ?, '种子管理员（本地演示，部署须改密）')",
+                            "VALUES (?, 1, ?, '种子管理员（演示口径，密码同演示账号）')",
                     id, Timestamp.valueOf(LocalDateTime.now()));
         }
     }
